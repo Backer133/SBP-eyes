@@ -65,9 +65,14 @@ class _MotionScreenState extends State<MotionScreen> {
         final tempo = _inv(cfg.holdMs, 8000, 1500);
         // Seitlich reicht der Regler weiter als vertikal: im Maskenschlitz ist nach
         // links und rechts viel mehr zu sehen, dieselbe Pixelzahl wirkt dort also
-        // schwaecher. Das obere Ende sind 40 px - genau der Ueberschuss, den das
-        // 320er-Bild ueber den 240er-Bildschirm hinaus hat. Mehr ginge nicht, ohne
-        // dass am Rand eine Luecke aufreisst.
+        // schwaecher. Das obere Ende sind 40 px.
+        //
+        // Seit die Bilder 360 px breit sind, betraegt der Ueberschuss ueber den
+        // 240er-Bildschirm 60 px statt 40 - die Grenze hier bleibt trotzdem bei 40.
+        // Die gewonnenen 20 px sind bewusst dem seitlichen Versatz zugedacht
+        // (Augen ausrichten, Schritt 3). Wer sie hier verbraucht, nimmt sie dort
+        // weg: die Firmware klemmt die Summe aus Ausschlag und Versatz auf den
+        // vorhandenen Ueberhang, damit am Rand keine Luecke aufreisst.
         final range = _inv(cfg.ampX, 10, 40);
         final blink = _inv(cfg.blinkWindowMs, 12000, 2000);
 

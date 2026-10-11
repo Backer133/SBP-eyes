@@ -59,8 +59,8 @@ class _CloudEyesScreenState extends State<CloudEyesScreen> {
     });
     try {
       final pngBytes = await _api.download(eye);
-      final rgb565 = pngToRgb565(pngBytes);
-      await widget.ble.uploadEye(slot, rgb565, onProgress: (sent, total) {
+      final jpeg = pngToEyeJpeg(pngBytes);
+      await widget.ble.uploadEye(slot, jpeg, onProgress: (sent, total) {
         if (!mounted) return;
         setState(() { _downloadDone = sent; _downloadTotal = total; });
       });

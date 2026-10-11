@@ -4,7 +4,7 @@ import 'dart:typed_data';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 
-import 'image_pipeline.dart' show kRgb565ByteCount;
+import 'image_pipeline.dart' show kEyeJpegMax, isCompleteJpeg;
 
 // UUIDs MUESSEN identisch zu denen im Master.ino sein!
 class EyeUuids {
@@ -40,8 +40,12 @@ class EyeUuids {
 }
 
 const int kHardcodedEyeCount = 4;   // A7, A10, A12, A13 (in dieser Reihenfolge!)
-// 4 statt 5: Bei 320x320 belegt ein Cloud-Auge 204800 Byte, das LittleFS auf dem
-// ESP hat 917504 - fuenf Slots passen nicht mehr, vier schon.
+// Vier Slots. Als Cloud-Augen noch Rohdaten waren (204800 Byte je Slot), war das
+// die Obergrenze: vier belegten 819200 der 917504 Byte des LittleFS. Als JPEG sind
+// es nur noch rund 45 KB je Slot, es waeren also deutlich mehr moeglich - acht
+// waere das Maximum, weil die Belegt-Maske vom Master ein Byte breit ist.
+// Bewusst bei vier geblieben: so bleiben alle gespeicherten Augen-Nummern gueltig
+// und das Raster bleibt wie es war. MUSS zu CLOUD_SLOT_COUNT in der Firmware passen.
 const int kCloudSlotCount    = 4;
 
 // Werks-Standard-Zugangscode (muss zu DEFAULT_DEVICE_KEY in der Firmware passen).
@@ -249,6 +253,11 @@ class EyeBle extends ChangeNotifier {
   // deshalb hat jedes Auge eigene Werte.
   List<int> eyeYOff = [0, 0];
   List<int> eyeVisH = [240, 240];
+  // Seitlicher Versatz und Augengroesse, ebenfalls je Auge. Die Firmware klemmt
+  // den Versatz zusaetzlich auf den tatsaechlich vorhandenen Bildueberhang -
+  // der Regler darf also weiter gehen, als am Ende sichtbar wirkt.
+  List<int> eyeXOff = [0, 0];
+  List<int> eyeZoom = [100, 100];   // Prozent, 100 = unveraendert
 
   // --- Bewegung (fuers Paar) ---
   AnimCfg? animCfg;                 // null = noch nicht gelesen
@@ -625,6 +634,13 @@ class EyeBle extends ChangeNotifier {
           eyeYOff = [_s8(v[0]), _s8(v[2])];
           eyeVisH = [v[1], v[3]];
         }
+        // Versatz und Groesse kamen spaeter dazu und haengen hinten dran. Eine
+        // aeltere Firmware antwortet mit vier Bytes - dann bleibt es bei den
+        // Vorgaben, statt dass die Regler auf Null springen.
+        if (v.length >= 8) {
+          eyeXOff = [_s8(v[4]), _s8(v[6])];
+          eyeZoom = [v[5], v[7]];
+        }
       } catch (_) {}
     }
 
@@ -668,23 +684,34 @@ class EyeBle extends ChangeNotifier {
   /// Setzt die Ausrichtung eines Auges. [target] 0 = Master, 1 = Slave.
   /// [persist] false = nur Vorschau (waehrend des Regler-Ziehens, kein Flash-Schreiben),
   /// true = uebernehmen und speichern.
-  Future<void> setEyeGeom(int target, int yOff, int visH, {bool persist = false}) async {
+  ///
+  /// Schreibt sechs Bytes: die vier alten plus xOff und zoom ANGEHAENGT. Eine
+  /// aeltere Firmware liest nur die ersten vier und laesst Versatz und Groesse
+  /// unveraendert - die App bleibt damit auch an einem noch nicht geflashten
+  /// Auge bedienbar.
+  Future<void> setEyeGeom(int target, int yOff, int visH,
+                          {int? xOff, int? zoom, bool persist = false}) async {
     final c = _chars[EyeUuids.chrEyeGeom];
     if (c == null || locked) return;
+    final x = xOff ?? eyeXOff[target];
+    final z = zoom ?? eyeZoom[target];
     eyeYOff[target] = yOff;
     eyeVisH[target] = visH;
+    eyeXOff[target] = x;
+    eyeZoom[target] = z;
     notifyListeners();
     if (!persist) {
       if (_throttled(_lastGeomPreview)) return;
       _lastGeomPreview = DateTime.now();
     }
-    await c.write([target, yOff & 0xFF, visH & 0xFF, persist ? 1 : 0],
+    await c.write([target, yOff & 0xFF, visH & 0xFF, persist ? 1 : 0,
+                   x & 0xFF, z & 0xFF],
         withoutResponse: false);
   }
 
-  /// Setzt Ausrichtung zurueck: Auge mittig, nichts abgedeckt.
+  /// Setzt Ausrichtung zurueck: Auge mittig, nichts abgedeckt, Groesse 100 %.
   Future<void> resetEyeGeom(int target) =>
-      setEyeGeom(target, 0, 240, persist: true);
+      setEyeGeom(target, 0, 240, xOff: 0, zoom: 100, persist: true);
 
   Future<void> _animCmd(int cmd, int arg, [Uint8List? payload]) async {
     final c = _chars[EyeUuids.chrAnimCfg];
@@ -830,26 +857,34 @@ class EyeBle extends ChangeNotifier {
   static const int _kChunkSizeMax = 503;
   int _chunkSize = _kChunkSizeMin;
 
-  Future<bool> uploadEye(int slot, Uint8List rgb565data,
+  Future<bool> uploadEye(int slot, Uint8List jpegData,
                           {void Function(int sent, int total)? onProgress}) async {
     if (locked) return false;
     final c = _chars[EyeUuids.chrEyeUpload];
     if (c == null) return false;
     if (slot < 0 || slot >= kCloudSlotCount) return false;
-    if (rgb565data.length != kRgb565ByteCount) {
-      throw Exception('rgb565data muss genau $kRgb565ByteCount Bytes haben (ist ${rgb565data.length})');
+    // Keine feste Groesse mehr - ein JPEG ist beliebig lang. Geprueft wird
+    // stattdessen, dass es ueberhaupt ein vollstaendiges JPEG ist und den
+    // Deckel einhaelt: die Firmware bricht einen zu grossen Upload sonst
+    // mitten in der Uebertragung ab, und ein unvollstaendiges Bild wuerde als
+    // Geisterbild im Slot zurueckbleiben.
+    if (!isCompleteJpeg(jpegData)) {
+      throw Exception('Kein vollstaendiges JPEG (SOI/EOI fehlen)');
     }
-    final total = (rgb565data.length + _chunkSize - 1) ~/ _chunkSize;
+    if (jpegData.length > kEyeJpegMax) {
+      throw Exception('JPEG zu gross: ${jpegData.length} Bytes, erlaubt sind $kEyeJpegMax');
+    }
+    final total = (jpegData.length + _chunkSize - 1) ~/ _chunkSize;
     for (int i = 0; i < total; i++) {
       final start = i * _chunkSize;
-      final end   = (start + _chunkSize) > rgb565data.length
-                    ? rgb565data.length
+      final end   = (start + _chunkSize) > jpegData.length
+                    ? jpegData.length
                     : (start + _chunkSize);
       final payload = <int>[
         0x01, slot,
         i & 0xFF, (i >> 8) & 0xFF,
         total & 0xFF, (total >> 8) & 0xFF,
-        ...rgb565data.sublist(start, end),
+        ...jpegData.sublist(start, end),
       ];
       await c.write(payload, withoutResponse: false);
       onProgress?.call(i + 1, total);

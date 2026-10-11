@@ -7,11 +7,16 @@ import '../theme.dart';
 ///
 /// Die Bedienung folgt der tatsächlichen Situation: Man steht vor der Maske, hält das
 /// Handy in einer Hand und schaut abwechselnd aufs Auge und aufs Display. Deshalb eine
-/// Vorschau statt bloßer Zahlen, Schrittknöpfe neben jedem Regler, und die zwei
+/// Vorschau statt bloßer Zahlen, Schrittknöpfe neben jedem Regler, und die vier
 /// Einstellungen als nummerierte Schritte statt als gleichwertige Kästen.
 ///
 /// Jede Maske ist handgeschnitzt, die Werte gelten deshalb je Auge — anders als die
 /// Bewegung, die für beide identisch sein muss.
+///
+/// Schritt 3 und 4 hängen zusammen: das Bild ragt nur begrenzt über den Displayrand
+/// hinaus, und die Blickbewegung verbraucht davon schon ihren Ausschlag. Was für den
+/// seitlichen Versatz übrig bleibt, nennt die Hinweiszeile unter Schritt 3 —
+/// Hineinzoomen in Schritt 4 vergrößert diesen Spielraum.
 class EyeAlignScreen extends StatefulWidget {
   final EyeBle ble;
   const EyeAlignScreen({super.key, required this.ble});
@@ -24,9 +29,19 @@ class _EyeAlignScreenState extends State<EyeAlignScreen> {
   bool _guides = true;           // beim Öffnen an: man will die Kante sehen
   int? _previewYOff;
   int? _previewVisH;
+  int? _previewXOff;
+  int? _previewZoom;
 
   static const int _minY = -60, _maxY = 60;
   static const int _minH = 60,  _maxH = 240;
+  static const int _minX = -40, _maxX = 40;
+  static const int _minZ = 100, _maxZ = 125;
+
+  /// Breite des Augenbildes und des Displays in Pixel. Daraus errechnet sich der
+  /// Überhang und damit, wie viel seitlicher Versatz überhaupt wirksam wird.
+  /// Muss zu CLOUD_IMG_W und screenWidth in der Firmware passen.
+  static const int _imgW = 360;
+  static const int _screenPx = 240;
 
   @override
   void initState() {
@@ -43,9 +58,12 @@ class _EyeAlignScreenState extends State<EyeAlignScreen> {
 
   int _yOff(EyeBle b) => _previewYOff ?? b.eyeYOff[_target];
   int _visH(EyeBle b) => _previewVisH ?? b.eyeVisH[_target];
+  int _xOff(EyeBle b) => _previewXOff ?? b.eyeXOff[_target];
+  int _zoom(EyeBle b) => _previewZoom ?? b.eyeZoom[_target];
 
   void _send(EyeBle b, {required bool persist}) =>
-      b.setEyeGeom(_target, _yOff(b), _visH(b), persist: persist);
+      b.setEyeGeom(_target, _yOff(b), _visH(b),
+                   xOff: _xOff(b), zoom: _zoom(b), persist: persist);
 
   void _stepY(EyeBle b, int delta) {
     setState(() => _previewYOff = (_yOff(b) + delta).clamp(_minY, _maxY));
@@ -59,9 +77,40 @@ class _EyeAlignScreenState extends State<EyeAlignScreen> {
     _previewVisH = null;
   }
 
+  void _stepX(EyeBle b, int delta) {
+    setState(() => _previewXOff = (_xOff(b) + delta).clamp(_minX, _maxX));
+    _send(b, persist: true);
+    _previewXOff = null;
+  }
+
+  void _stepZ(EyeBle b, int delta) {
+    setState(() => _previewZoom = (_zoom(b) + delta).clamp(_minZ, _maxZ));
+    _send(b, persist: true);
+    _previewZoom = null;
+  }
+
   String _yLabel(int v) {
     if (v == 0) return 'Mitte';
     return v < 0 ? '${-v} nach oben' : '$v nach unten';
+  }
+
+  String _xLabel(int v) {
+    if (v == 0) return 'Mitte';
+    return v < 0 ? '${-v} nach links' : '$v nach rechts';
+  }
+
+  /// Wie viel seitlicher Versatz bei der aktuellen Größe wirklich ankommt.
+  ///
+  /// Das Bild ragt um (Bildbreite·Zoom − Display)/2 über jeden Rand hinaus, und
+  /// davon verbraucht die Blickbewegung schon ihren Ausschlag. Was übrig bleibt,
+  /// ist der nutzbare Versatz — die Firmware klemmt genau darauf, damit am Rand
+  /// kein heller Streifen aufreißt. Ohne diese Zeile in der Bedienung wirkte ein
+  /// Regler, der bis 40 geht, aber bei 20 stehen bleibt, wie ein Fehler.
+  int _xBudget(EyeBle b) {
+    final amp = b.animCfg?.ampX ?? 40;
+    final overhang = ((_imgW * _zoom(b)) ~/ 100 - _screenPx) ~/ 2;
+    final free = overhang - amp;
+    return free < 0 ? 0 : free;
   }
 
   @override
@@ -72,6 +121,9 @@ class _EyeAlignScreenState extends State<EyeAlignScreen> {
         final ble = widget.ble;
         final yOff = _yOff(ble);
         final visH = _visH(ble);
+        final xOff = _xOff(ble);
+        final zoom = _zoom(ble);
+        final budget = _xBudget(ble);
 
         return Scaffold(
           appBar: AppBar(title: const Text('Augen ausrichten')),
@@ -93,6 +145,8 @@ class _EyeAlignScreenState extends State<EyeAlignScreen> {
                         _target = s.first;
                         _previewYOff = null;
                         _previewVisH = null;
+                        _previewXOff = null;
+                        _previewZoom = null;
                       }),
                     ),
                   ),
@@ -110,7 +164,10 @@ class _EyeAlignScreenState extends State<EyeAlignScreen> {
               Center(
                 child: SizedBox(
                   width: 150, height: 150,
-                  child: CustomPaint(painter: _EyePreview(yOff: yOff, visH: visH)),
+                  child: CustomPaint(
+                    painter: _EyePreview(yOff: yOff, visH: visH,
+                                         xOff: xOff, zoom: zoom),
+                  ),
                 ),
               ),
               const SizedBox(height: 24),
@@ -143,6 +200,39 @@ class _EyeAlignScreenState extends State<EyeAlignScreen> {
                 onPlus:  () => _stepH(ble,  2),
               ),
 
+              _step(
+                number: '3',
+                title: 'Auge seitlich ausrichten',
+                hint: budget == 0
+                    ? 'Bei $zoom % Größe bleibt seitlich kein Spielraum — '
+                      'in Schritt 4 etwas hineinzoomen'
+                    : 'Bis die Pupille waagrecht mittig sitzt '
+                      '(wirksam sind derzeit ±$budget px)',
+                value: _xLabel(xOff),
+                raw: '$xOff px',
+                sliderValue: xOff.toDouble(),
+                min: _minX.toDouble(), max: _maxX.toDouble(),
+                onChanged: (v) { setState(() => _previewXOff = v.round()); _send(ble, persist: false); },
+                onChangeEnd: (v) { _previewXOff = v.round(); _send(ble, persist: true); _previewXOff = null; },
+                onMinus: () => _stepX(ble, -2),
+                onPlus:  () => _stepX(ble,  2),
+              ),
+
+              _step(
+                number: '4',
+                title: 'Augengröße',
+                hint: 'Größer wirkende Pupille — schafft zugleich Spielraum '
+                      'für Schritt 3',
+                value: '$zoom %',
+                raw: '$zoom %',
+                sliderValue: zoom.toDouble(),
+                min: _minZ.toDouble(), max: _maxZ.toDouble(),
+                onChanged: (v) { setState(() => _previewZoom = v.round()); _send(ble, persist: false); },
+                onChangeEnd: (v) { _previewZoom = v.round(); _send(ble, persist: true); _previewZoom = null; },
+                onMinus: () => _stepZ(ble, -5),
+                onPlus:  () => _stepZ(ble,  5),
+              ),
+
               const SizedBox(height: 8),
               const Divider(),
 
@@ -165,6 +255,8 @@ class _EyeAlignScreenState extends State<EyeAlignScreen> {
                 onTap: ble.locked ? null : () {
                   _previewYOff = null;
                   _previewVisH = null;
+                  _previewXOff = null;
+                  _previewZoom = null;
                   ble.resetEyeGeom(_target);
                 },
               ),
@@ -271,7 +363,10 @@ class _EyeAlignScreenState extends State<EyeAlignScreen> {
 class _EyePreview extends CustomPainter {
   final int yOff;
   final int visH;
-  const _EyePreview({required this.yOff, required this.visH});
+  final int xOff;
+  final int zoom;      // Prozent
+  const _EyePreview({required this.yOff, required this.visH,
+                     required this.xOff, required this.zoom});
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -285,10 +380,14 @@ class _EyePreview extends CustomPainter {
     canvas.save();
     canvas.clipPath(Path()..addOval(Rect.fromCircle(center: c, radius: r)));
 
-    // Auge: heller Kreis, um yOff verschoben
-    final eyeC = Offset(r, r + yOff * scale);
-    canvas.drawCircle(eyeC, r * 0.62, Paint()..color = const Color(0xFFDCE3F0));
-    canvas.drawCircle(eyeC, r * 0.26, Paint()..color = kAccent);
+    // Auge: heller Kreis, um yOff und xOff verschoben, mit zoom skaliert.
+    // Der seitliche Versatz wird hier UNGEKLEMMT gezeigt - die Vorschau soll
+    // abbilden, was eingestellt ist, nicht was die Firmware daraus macht.
+    // Wie viel davon ankommt, sagt die Hinweiszeile unter Schritt 3.
+    final z = zoom / 100.0;
+    final eyeC = Offset(r + xOff * scale, r + yOff * scale);
+    canvas.drawCircle(eyeC, r * 0.62 * z, Paint()..color = const Color(0xFFDCE3F0));
+    canvas.drawCircle(eyeC, r * 0.26 * z, Paint()..color = kAccent);
 
     // Abdeckung oben und unten - genau die Balken, die auch das Gerät zeichnet
     final half = visH / 2.0;
@@ -318,5 +417,6 @@ class _EyePreview extends CustomPainter {
 
   @override
   bool shouldRepaint(covariant _EyePreview old) =>
-      old.yOff != yOff || old.visH != visH;
+      old.yOff != yOff || old.visH != visH ||
+      old.xOff != xOff || old.zoom != zoom;
 }
