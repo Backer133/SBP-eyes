@@ -31,7 +31,11 @@ class CloudEye {
 class GithubCloudEyes {
   // Neues, vom alten eye-pair-app abgeschottetes Repo (oeffentlich, damit die App
   // die Augen ohne Login ueber die GitHub-API laden kann).
-  static const String repo = 'Backer133/eye_pair_app_new_screens_cheaper';
+  // Umbenannt am 11.10.2026 (vorher eye_pair_app_new_screens_cheaper).
+  // GitHub leitet alte Namen zwar dauerhaft um, sodass bereits installierte
+  // Apps weiterlaufen - verlassen sollte man sich darauf aber nicht: die
+  // Umleitung bricht, sobald jemand ein neues Repo mit dem alten Namen anlegt.
+  static const String repo = 'Backer133/SBP-eyes';
   static const String path = 'cloud-eyes';
   static const String branch = 'main';
 
