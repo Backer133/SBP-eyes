@@ -129,3 +129,85 @@ jobs:
         with:
           name: eye_pair_app-ios-unsigned
           path: build/ios/iphoneos/eye_pair_app-unsigned.ipa
+
+  # ============ Web Build + GitHub Pages ============
+  # NUR fuer iOS gedacht. Safari kann kein Web Bluetooth (caniuse: "Safari on iOS
+  # and iPadOS has no native support"), und weil Apple fuer alle iOS-Browser
+  # WebKit vorschreibt, hilft dort auch Chrome nicht. Die Seite ist fuer Helfer
+  # aus dem App Store gedacht - Bluefy oder die Safari-Erweiterung iOSWebBLE -,
+  # die navigator.bluetooth auf CoreBluetooth umleiten. Das erspart Sideload,
+  # die 7-Tage-Signatur und den bezahlten Entwicklerzugang.
+  #
+  # Fuer Android bleibt es bei der APK: die kann Signalstaerke, Adapterzustand
+  # und die volle Paketgroesse beim Upload, was ueber Web Bluetooth alles fehlt.
+  web:
+    name: Build Web + Pages
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: write          # noetig zum Veroeffentlichen
+      id-token: write       # noetig fuer deploy-pages
+    # Zwei dicht aufeinanderfolgende Pushes wuerden sonst gleichzeitig
+    # veroeffentlichen wollen und einer davon scheitern. cancel-in-progress
+    # bleibt aus: eine halb abgebrochene Veroeffentlichung waere schlimmer
+    # als eine, die kurz wartet.
+    concurrency:
+      group: pages
+      cancel-in-progress: false
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.32.0'
+          channel: 'stable'
+
+      - name: Init Web-Template
+        # Wie bei Android und iOS: die Plattform-Vorlage liegt nicht im Repo,
+        # sie wird bei jedem Lauf neu erzeugt.
+        run: flutter create . --platforms=android,ios,web --org at.sbp --project-name=eye_pair_app
+
+      - name: Install deps
+        run: flutter pub get
+
+      - name: Version von flutter_blue_plus pruefen
+        # Web-Unterstuetzung gibt es erst ab 1.35.0. Die Angabe in pubspec.yaml
+        # lautet ^1.34.5 und erlaubt das - aber wenn hier doch 1.34.x steht,
+        # waere der ganze Versuch sinnlos, und zwar ohne sichtbaren Fehler:
+        # die Seite baut, nur Bluetooth fehlt. Deshalb hart abbrechen.
+        run: |
+          VER=$(flutter pub deps --style=compact 2>/dev/null \
+                | grep -oE 'flutter_blue_plus [0-9]+\.[0-9]+\.[0-9]+' \
+                | head -1 | awk '{print $2}')
+          echo "flutter_blue_plus = ${VER:-nicht gefunden}"
+          if [ -z "$VER" ]; then echo "::error::Version nicht ermittelbar"; exit 1; fi
+          MAJ=${VER%%.*}; REST=${VER#*.}; MIN=${REST%%.*}
+          if [ "$MAJ" -lt 2 ] && [ "$MIN" -lt 35 ]; then
+            echo "::error::flutter_blue_plus $VER kann kein Web - noetig ist >= 1.35.0"
+            exit 1
+          fi
+
+      - name: Build Web
+        # base-href: Pages liefert unter /<repo>/ aus. Ohne diesen Pfad sucht die
+        # Seite ihre Dateien in der Wurzel und bleibt weiss.
+        run: flutter build web --release --base-href "/${GITHUB_REPOSITORY#*/}/"
+
+      - name: Pages einrichten
+        # enablement: true schaltet Pages beim ersten Lauf selbst ein - die
+        # Einstellung war im Repo noch nie gesetzt.
+        uses: actions/configure-pages@v5
+        with:
+          enablement: true
+
+      - name: Artefakt hochladen
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: build/web
+
+      - name: Veroeffentlichen
+        id: deploy
+        uses: actions/deploy-pages@v4
