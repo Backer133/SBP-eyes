@@ -37,10 +37,15 @@ class _EyeAlignScreenState extends State<EyeAlignScreen> {
   static const int _minX = -40, _maxX = 40;
   static const int _minZ = 100, _maxZ = 125;
 
-  /// Breite des Augenbildes und des Displays in Pixel. Daraus errechnet sich der
-  /// Überhang und damit, wie viel seitlicher Versatz überhaupt wirksam wird.
-  /// Muss zu CLOUD_IMG_W und screenWidth in der Firmware passen.
-  static const int _imgW = 360;
+  /// Breite des eigentlichen Augen-Inhalts und des Displays in Pixel.
+  ///
+  /// Das Bild ist 360 px breit, der Inhalt aber nur 280 — außen liegen 40 px
+  /// fortgesetzte Randpixel, damit beim Verschieben keine harte Kante entsteht.
+  /// Dauerhaft sichtbar werden darf dieser Streifen nicht: wo eine Ader die
+  /// Inhaltskante kreuzt, wird sie darin zu einem Strich gezogen. Der nutzbare
+  /// Versatz misst sich deshalb an der Inhaltskante, nicht an der Bildkante.
+  /// Muss zu EYE_CONTENT_W und screenWidth in der Firmware passen.
+  static const int _contentW = 280;
   static const int _screenPx = 240;
 
   @override
@@ -101,15 +106,18 @@ class _EyeAlignScreenState extends State<EyeAlignScreen> {
 
   /// Wie viel seitlicher Versatz bei der aktuellen Größe wirklich ankommt.
   ///
-  /// Das Bild ragt um (Bildbreite·Zoom − Display)/2 über jeden Rand hinaus, und
-  /// davon verbraucht die Blickbewegung schon ihren Ausschlag. Was übrig bleibt,
-  /// ist der nutzbare Versatz — die Firmware klemmt genau darauf, damit am Rand
-  /// kein heller Streifen aufreißt. Ohne diese Zeile in der Bedienung wirkte ein
+  /// Der Inhalt deckt das Display nur um (Inhalt·Zoom − Display)/2 je Seite
+  /// über — bei 100 % sind das 20 px, bei 125 % schon 55. Weiter verschoben
+  /// käme der fortgesetzte Rand ins Bild und die Adern würden zu Strichen
+  /// gezogen. Die Firmware klemmt genau darauf; ohne diese Zeile wirkte ein
   /// Regler, der bis 40 geht, aber bei 20 stehen bleibt, wie ein Fehler.
+  ///
+  /// Die Blickbewegung zählt hier bewusst NICHT mit: sie darf kurz in den
+  /// fortgesetzten Rand fahren (das war schon immer so und fällt im
+  /// Vorbeifahren nicht auf), nur der Versatz ist ein Dauerzustand.
   int _xBudget(EyeBle b) {
-    final amp = b.animCfg?.ampX ?? 40;
-    final overhang = ((_imgW * _zoom(b)) ~/ 100 - _screenPx) ~/ 2;
-    final free = overhang - amp;
+    final contentHalf = (_contentW * _zoom(b)) ~/ 100 ~/ 2;
+    final free = contentHalf - _screenPx ~/ 2;
     return free < 0 ? 0 : free;
   }
 
@@ -165,8 +173,14 @@ class _EyeAlignScreenState extends State<EyeAlignScreen> {
                 child: SizedBox(
                   width: 150, height: 150,
                   child: CustomPaint(
-                    painter: _EyePreview(yOff: yOff, visH: visH,
-                                         xOff: xOff, zoom: zoom),
+                    // xOff GEKLEMMT: die Vorschau soll zeigen, was das Gerät
+                    // tatsächlich tut. Ungeklemmt stünde das Auge hier doppelt
+                    // so weit außen wie in Wirklichkeit, sobald der Regler über
+                    // den wirksamen Bereich hinaus gestellt ist.
+                    painter: _EyePreview(
+                      yOff: yOff, visH: visH, zoom: zoom,
+                      xOff: xOff.clamp(-budget, budget),
+                    ),
                   ),
                 ),
               ),
@@ -205,9 +219,9 @@ class _EyeAlignScreenState extends State<EyeAlignScreen> {
                 title: 'Auge seitlich ausrichten',
                 hint: budget == 0
                     ? 'Bei $zoom % Größe bleibt seitlich kein Spielraum — '
-                      'in Schritt 4 etwas hineinzoomen'
-                    : 'Bis die Pupille waagrecht mittig sitzt '
-                      '(wirksam sind derzeit ±$budget px)',
+                      'in Schritt 4 etwas größer stellen'
+                    : 'Bis die Pupille waagrecht mittig sitzt. Wirksam sind '
+                      '±$budget px — weiter würde der Bildrand sichtbar',
                 value: _xLabel(xOff),
                 raw: '$xOff px',
                 sliderValue: xOff.toDouble(),
@@ -381,9 +395,8 @@ class _EyePreview extends CustomPainter {
     canvas.clipPath(Path()..addOval(Rect.fromCircle(center: c, radius: r)));
 
     // Auge: heller Kreis, um yOff und xOff verschoben, mit zoom skaliert.
-    // Der seitliche Versatz wird hier UNGEKLEMMT gezeigt - die Vorschau soll
-    // abbilden, was eingestellt ist, nicht was die Firmware daraus macht.
-    // Wie viel davon ankommt, sagt die Hinweiszeile unter Schritt 3.
+    // xOff kommt vom Aufrufer schon geklemmt an, damit die Vorschau das Gerät
+    // abbildet und nicht die Reglerstellung.
     final z = zoom / 100.0;
     final eyeC = Offset(r + xOff * scale, r + yOff * scale);
     canvas.drawCircle(eyeC, r * 0.62 * z, Paint()..color = const Color(0xFFDCE3F0));
