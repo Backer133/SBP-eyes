@@ -54,16 +54,29 @@ Uint8List pngToEyeJpeg(Uint8List pngBytes) {
                        interpolation: img.Interpolation.linear)
       : src;
 
-  // Leinwand mit fortgesetztem Rand: jedes Pixel ausserhalb des Inhalts uebernimmt
-  // den naechstgelegenen Inhaltsrand (Clamp). Bei den Augen ist das die gleichmaessige
-  // helle Sklera, der Uebergang faellt deshalb nicht auf. Genau dieses Layout haben
-  // auch die eingebauten Augen - dort nachgemessen: 280x280 Inhalt, 40 px Clamp.
+  // Leinwand mit GESPIEGELTEM Rand.
+  //
+  // Frueher wurde hier geklemmt, also jedes Randpixel aus dem naechstgelegenen
+  // Inhaltspixel kopiert. Wo eine Ader die Inhaltskante kreuzt, wird sie dabei
+  // ueber die ganze Randbreite zu einem waagrechten Strich gezogen - sobald das
+  // Auge seitlich am Anschlag steht, sind das deutlich sichtbare rote Streifen.
+  // Die Spiegelung setzt die Adern stattdessen plausibel fort: sie biegen
+  // zurueck, und der Uebergang faellt nicht auf.
+  //
+  // Dasselbe Verfahren benutzt tools/eye_assets.py fuer die eingebauten Augen -
+  // beide muessen gleich aussehen, sonst faellt der Wechsel zwischen einem
+  // Cloud-Auge und einem eingebauten auf.
   final pad = (kEyeWidth - kEyeContent) ~/ 2;
+  int refl(int v) {
+    if (v < 0) return -v - 1;
+    if (v >= kEyeContent) return 2 * kEyeContent - v - 1;
+    return v;
+  }
   final canvas = img.Image(width: kEyeWidth, height: kEyeHeight);
   for (int y = 0; y < kEyeHeight; y++) {
-    final sy = (y - pad).clamp(0, kEyeContent - 1);
+    final sy = refl(y - pad).clamp(0, kEyeContent - 1);
     for (int x = 0; x < kEyeWidth; x++) {
-      final sx = (x - pad).clamp(0, kEyeContent - 1);
+      final sx = refl(x - pad).clamp(0, kEyeContent - 1);
       canvas.setPixel(x, y, content.getPixel(sx, sy));
     }
   }

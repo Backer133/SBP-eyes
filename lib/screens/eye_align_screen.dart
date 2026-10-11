@@ -37,15 +37,14 @@ class _EyeAlignScreenState extends State<EyeAlignScreen> {
   static const int _minX = -40, _maxX = 40;
   static const int _minZ = 100, _maxZ = 125;
 
-  /// Breite des eigentlichen Augen-Inhalts und des Displays in Pixel.
+  /// Breite des brauchbaren Bildinhalts und des Displays in Pixel.
   ///
-  /// Das Bild ist 360 px breit, der Inhalt aber nur 280 — außen liegen 40 px
-  /// fortgesetzte Randpixel, damit beim Verschieben keine harte Kante entsteht.
-  /// Dauerhaft sichtbar werden darf dieser Streifen nicht: wo eine Ader die
-  /// Inhaltskante kreuzt, wird sie darin zu einem Strich gezogen. Der nutzbare
-  /// Versatz misst sich deshalb an der Inhaltskante, nicht an der Bildkante.
+  /// Das Bild ist 360 px breit; der Augeninhalt ist 280 und liegt mittig, die
+  /// äußeren 40 px je Seite sind gespiegelt fortgesetzt. Weil die Spiegelung
+  /// die Adern plausibel weiterführt, zählt der Randstreifen als brauchbarer
+  /// Inhalt — deshalb steht hier 360 und nicht 280.
   /// Muss zu EYE_CONTENT_W und screenWidth in der Firmware passen.
-  static const int _contentW = 280;
+  static const int _contentW = 360;
   static const int _screenPx = 240;
 
   @override
@@ -112,12 +111,14 @@ class _EyeAlignScreenState extends State<EyeAlignScreen> {
   /// gezogen. Die Firmware klemmt genau darauf; ohne diese Zeile wirkte ein
   /// Regler, der bis 40 geht, aber bei 20 stehen bleibt, wie ein Fehler.
   ///
-  /// Die Blickbewegung zählt hier bewusst NICHT mit: sie darf kurz in den
-  /// fortgesetzten Rand fahren (das war schon immer so und fällt im
-  /// Vorbeifahren nicht auf), nur der Versatz ist ein Dauerzustand.
+  /// Der Ausschlag der Blickbewegung geht ab: die Bewegung behält ihre volle
+  /// Weite, der Versatz bekommt nur den Rest. Sonst addieren sich beide und
+  /// holen gemeinsam den fortgesetzten Rand ins Bild — genau das waren die
+  /// verschmierten Adern am Anschlag.
   int _xBudget(EyeBle b) {
+    final amp = b.animCfg?.ampX ?? 40;
     final contentHalf = (_contentW * _zoom(b)) ~/ 100 ~/ 2;
-    final free = contentHalf - _screenPx ~/ 2;
+    final free = contentHalf - _screenPx ~/ 2 - amp;
     return free < 0 ? 0 : free;
   }
 
@@ -218,10 +219,11 @@ class _EyeAlignScreenState extends State<EyeAlignScreen> {
                 number: '3',
                 title: 'Auge seitlich ausrichten',
                 hint: budget == 0
-                    ? 'Bei $zoom % Größe bleibt seitlich kein Spielraum — '
-                      'in Schritt 4 etwas größer stellen'
+                    ? 'Kein Spielraum: bei $zoom % Größe braucht die '
+                      'Blickbewegung den ganzen Bildrand. Schritt 4 größer '
+                      'stellen oder den seitlichen Ausschlag verkleinern'
                     : 'Bis die Pupille waagrecht mittig sitzt. Wirksam sind '
-                      '±$budget px — weiter würde der Bildrand sichtbar',
+                      '±$budget px — weiter würden die Adern verschmieren',
                 value: _xLabel(xOff),
                 raw: '$xOff px',
                 sliderValue: xOff.toDouble(),
