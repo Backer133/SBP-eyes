@@ -99,6 +99,18 @@ class _DiscoveryScreenState extends State<DiscoveryScreen>
     if (_starting || _scanning) return;   // kein Doppelstart
     setState(() { _starting = true; _error = null; });
     try {
+      // Eine noch offene Verbindung VOR dem Suchen trennen.
+      //
+      // Das Auge wirbt nur, solange niemand verbunden ist: die Firmware ruft
+      // startAdvertising() erst wieder beim Trennen auf. Hing also ein früherer
+      // Versuch, blieb die Verbindung offen — und der nächste Suchlauf fand
+      // schlicht nichts mehr, obwohl das Auge einen halben Meter entfernt lag.
+      //
+      // Im Browser fällt das besonders auf, weil dort jeder Suchlauf den
+      // Auswahldialog öffnet und eine leere Liste dadurch unübersehbar ist.
+      if (widget.ble.connected || widget.ble.device != null) {
+        await widget.ble.disconnect();
+      }
       // Laufenden Scan sauber stoppen.
       if (FlutterBluePlus.isScanningNow) {
         try { await FlutterBluePlus.stopScan(); } catch (_) {}

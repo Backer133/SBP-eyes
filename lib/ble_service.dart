@@ -398,11 +398,39 @@ class EyeBle extends ChangeNotifier {
       } catch (_) {}
     }
     if (_sessionKey != null) {
+      final before = authLevel;
       await _writeKey(c, _sessionKey!);
       // Kurz auf die Autorisierungs-Antwort warten, damit das Gate beim stillen
-      // Reconnect nicht aufblitzt.
-      for (int i = 0; i < 16 && !authorized; i++) {
-        await Future.delayed(const Duration(milliseconds: 50));
+      // Reconnect nicht aufblitzt. Fragt aktiv nach statt nur zu lauschen -
+      // Begruendung bei _awaitAuthLevelChange().
+      await _awaitAuthLevelChange(before, tries: 16);
+    }
+  }
+
+  /// Wartet darauf, dass die Firmware das Autorisierungs-Level ändert.
+  ///
+  /// Wartet NICHT nur auf die Benachrichtigung, sondern FRAGT AKTIV NACH.
+  /// Grund: Das Abonnieren von Benachrichtigungen kann stillschweigend
+  /// fehlschlagen — die App führt dafür nicht umsonst eine Liste
+  /// (`subscribeErrors`, im Diagnose-Bildschirm sichtbar). Im Browser ist das
+  /// der Normalfall statt der Ausnahme: über Web Bluetooth kam die Antwort auf
+  /// dem iPhone nie an, die Eingabe des Zugangscodes lief ins Leere, obwohl das
+  /// Auge ihn längst angenommen hatte.
+  ///
+  /// CHR_AUTH_STATUS ist READ/NOTIFY — Nachfragen ist also jederzeit erlaubt und
+  /// auf jeder Plattform verlässlich. Die Benachrichtigung bleibt zusätzlich
+  /// aktiv; kommt sie an, ist man nur schneller fertig.
+  Future<void> _awaitAuthLevelChange(int before, {int tries = 20}) async {
+    final cs = _chars[EyeUuids.chrAuthStatus];
+    for (int i = 0; i < tries && authLevel == before; i++) {
+      await Future.delayed(const Duration(milliseconds: 50));
+      if (cs == null || authLevel != before) continue;
+      try {
+        final v = await cs.read();
+        if (v.isNotEmpty) { _parseAuthLevel(v[0]); notifyListeners(); }
+      } catch (_) {
+        // Ein fehlgeschlagener Lesevorgang ist kein Grund abzubrechen - beim
+        // naechsten Durchgang kann es klappen.
       }
     }
   }
@@ -419,9 +447,7 @@ class EyeBle extends ChangeNotifier {
     // Antwort der Firmware da ist - isAdmin waere dann noch nicht gesetzt.
     final before = authLevel;
     await _writeKey(c, key);
-    for (int i = 0; i < 20 && authLevel == before; i++) {
-      await Future.delayed(const Duration(milliseconds: 50));
-    }
+    await _awaitAuthLevelChange(before);
     if (authorized) {
       _sessionKey = key;   // korrekter Code -> nur fuer diese Sitzung merken (RAM)
       // isAdmin wurde bereits aus CHR_AUTH_STATUS gesetzt (_parseAuthLevel) -
