@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import '../app_version.dart';
 import '../eye_log.dart';
 import '../theme.dart';
 
@@ -17,6 +18,15 @@ class LogScreen extends StatelessWidget {
     return Scaffold(
       appBar: AppBar(
         title: const Text('Protokoll'),
+        bottom: PreferredSize(
+          preferredSize: const Size.fromHeight(18),
+          child: Padding(
+            padding: const EdgeInsets.only(bottom: 6),
+            child: Text('Fassung $kAppVersion',
+                style: TextStyle(
+                    fontSize: 11, color: Colors.white.withOpacity(.45))),
+          ),
+        ),
         actions: [
           IconButton(
             icon: const Icon(Icons.delete_outline),

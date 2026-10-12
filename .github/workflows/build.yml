@@ -191,10 +191,31 @@ jobs:
             exit 1
           fi
 
+      - name: Fassung in app_version.dart gegen pubspec.yaml pruefen
+        # Eine angezeigte Fassung, die luegt, waere schlimmer als gar keine -
+        # sie ist genau dann im Weg, wenn man ihr am meisten glauben moechte.
+        run: |
+          PUB=$(grep -E '^version:' pubspec.yaml | awk '{print $2}')
+          DART=$(grep -oE "kAppVersion = '[^']+'" lib/app_version.dart \
+                 | sed "s/.*'\(.*\)'/\1/")
+          echo "pubspec=$PUB  app_version.dart=$DART"
+          if [ "$PUB" != "$DART" ]; then
+            echo "::error::kAppVersion ($DART) passt nicht zu pubspec.yaml ($PUB)"
+            exit 1
+          fi
+
       - name: Build Web
         # base-href: Pages liefert unter /<repo>/ aus. Ohne diesen Pfad sucht die
         # Seite ihre Dateien in der Wurzel und bleibt weiss.
-        run: flutter build web --release --base-href "/${GITHUB_REPOSITORY#*/}/"
+        #
+        # pwa-strategy=none: KEIN Service Worker. Flutter registriert sonst einen,
+        # der die App offline vorhaelt - und beim Neuladen zuerst die ALTE Fassung
+        # ausliefert, waehrend die neue im Hintergrund geholt wird. Sichtbar wird
+        # sie dann fruehestens beim uebernaechsten Start. Beim Suchen eines Fehlers
+        # ist das verheerend: man testet den Stand von vorgestern und haelt das
+        # Ergebnis fuer das der eben veroeffentlichten Fassung. Offline nuetzt die
+        # Seite ohnehin nichts, sie braucht ein Auge in Funkreichweite.
+        run: flutter build web --release --pwa-strategy=none --base-href "/${GITHUB_REPOSITORY#*/}/"
 
       - name: Pages einrichten
         # enablement: true schaltet Pages beim ersten Lauf selbst ein - die

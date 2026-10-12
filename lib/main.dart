@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
+import 'app_version.dart';
 import 'ble_service.dart';
 import 'eye_log.dart';
 import 'theme.dart';
@@ -23,7 +24,7 @@ void main() {
       EyeLog.add('Fehler: ${details.exceptionAsString()}');
       vorher?.call(details);
     };
-    EyeLog.add('App gestartet (${kIsWeb ? "Browser" : "App"})');
+    EyeLog.add('App $kAppVersion gestartet (${kIsWeb ? "Browser" : "App"})');
     runApp(const EyePairApp());
   }, (error, stack) {
     // Hier landen Ausnahmen aus Futures, die niemand abwartet - also genau die

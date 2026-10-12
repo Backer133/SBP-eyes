@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'package:permission_handler/permission_handler.dart';
 
+import '../app_version.dart';
 import '../ble_service.dart';
 import '../theme.dart';
 import 'home.dart';
@@ -252,6 +253,13 @@ class _DiscoveryScreenState extends State<DiscoveryScreen>
                     ? 'Suche nach Augenpaaren...'
                     : '${_results.length} Augenpaar${_results.length == 1 ? '' : 'e'} gefunden',
                 style: TextStyle(fontSize: 13, color: Colors.white.withOpacity(.55)),
+              ),
+              // Die Fassung sichtbar machen. Klingt nach Zierde, ist aber die
+              // Antwort auf die Frage "teste ich ueberhaupt den neuen Stand?" -
+              // die im Browser nicht selbstverstaendlich mit Ja zu beantworten ist.
+              Text(
+                'Fassung $kAppVersion',
+                style: TextStyle(fontSize: 11, color: Colors.white.withOpacity(.32)),
               ),
             ],
           ),
