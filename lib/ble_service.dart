@@ -778,7 +778,10 @@ class EyeBle extends ChangeNotifier {
     final c = _chars[EyeUuids.chrDeviceName];
     final trimmed = name.trim();
     if (c == null || trimmed.isEmpty || trimmed.length > 23) return false;
-    await c.write(trimmed.codeUnits, withoutResponse: false);
+    if (!await _writeGuarded(c, trimmed.codeUnits)) {
+      notifyListeners();
+      return false;
+    }
     deviceName = trimmed;
     notifyListeners();
     return true;
@@ -903,15 +906,11 @@ class EyeBle extends ChangeNotifier {
   /// Werkseinstellung und nach jedem Setzen: die Firmware klemmt Werte auf gueltige
   /// Bereiche, und die Regler sollen zeigen, was das Auge wirklich macht.
   Future<void> _readAnimCfg() async {
-    final ca = _chars[EyeUuids.chrAnimCfg];
-    if (ca == null) return;
-    try {
-      final v = await ca.read();
-      if (v.length >= AnimCfg.byteLength) {
-        animCfg = AnimCfg.fromBytes(v);
-        notifyListeners();
-      }
-    } catch (_) {}
+    final v = await _readBytes(EyeUuids.chrAnimCfg);
+    if (v != null && v.length >= AnimCfg.byteLength) {
+      animCfg = AnimCfg.fromBytes(v);
+      notifyListeners();
+    }
   }
 
   /// Byte als vorzeichenbehaftet lesen - y_off kann negativ sein.
@@ -952,19 +951,18 @@ class EyeBle extends ChangeNotifier {
       if (_throttled(_lastGeomPreview)) return;
       _lastGeomPreview = DateTime.now();
     }
-    await c.write([target, yOff & 0xFF, visH & 0xFF, persist ? 1 : 0,
-                   x & 0xFF, z & 0xFF],
-        withoutResponse: false);
+    await _writeGuarded(c, [target, yOff & 0xFF, visH & 0xFF, persist ? 1 : 0,
+                            x & 0xFF, z & 0xFF]);
   }
 
   /// Setzt Ausrichtung zurueck: Auge mittig, nichts abgedeckt, Groesse 100 %.
   Future<void> resetEyeGeom(int target) =>
       setEyeGeom(target, 0, 240, xOff: 0, zoom: 100, persist: true);
 
-  Future<void> _animCmd(int cmd, int arg, [Uint8List? payload]) async {
+  Future<bool> _animCmd(int cmd, int arg, [Uint8List? payload]) async {
     final c = _chars[EyeUuids.chrAnimCfg];
-    if (c == null || locked) return;
-    await c.write(<int>[cmd, arg, ...?payload], withoutResponse: false);
+    if (c == null || locked) return false;
+    return _writeGuarded(c, <int>[cmd, arg, ...?payload]);
   }
 
   Future<void> setAnimCfg(AnimCfg cfg, {bool persist = false}) async {
@@ -1013,10 +1011,10 @@ class EyeBle extends ChangeNotifier {
 
   // ===== Kopplung =====
 
-  Future<void> _pairCmd(int cmd, [List<int>? mac]) async {
+  Future<bool> _pairCmd(int cmd, [List<int>? mac]) async {
     final c = _chars[EyeUuids.chrPairCtrl];
-    if (c == null || locked) return;
-    await c.write(<int>[cmd, ...?mac], withoutResponse: false);
+    if (c == null || locked) return false;
+    return _writeGuarded(c, <int>[cmd, ...?mac]);
   }
 
   /// Startet die Suche nach koppelbaren Slaves. Der Master wechselt dafuer auf
@@ -1069,9 +1067,11 @@ class EyeBle extends ChangeNotifier {
       return false;
     }
     try {
+      // Dieselbe Frist wie beim Lesen: seit eine gerissene Frist den Kanal fuer
+      // tot erklaert, waere eine knappere hier gefaehrlich, nicht vorsichtig.
       await _serialize(() => c
           .write(data, withoutResponse: false)
-          .timeout(const Duration(seconds: 6)));
+          .timeout(_kGattStep));
       lastError = null;
       return true;
     } on TimeoutException {
@@ -1199,11 +1199,14 @@ class EyeBle extends ChangeNotifier {
         total & 0xFF, (total >> 8) & 0xFF,
         ...jpegData.sublist(start, end),
       ];
-      await c.write(payload, withoutResponse: false);
+      // Ueber _writeGuarded: Frist und Warteschlange wie ueberall sonst. Ohne
+      // das koennte ein Haeppchen mit einem anderen Vorgang kollidieren - im
+      // Browser laesst Web Bluetooth nur einen gleichzeitig zu.
+      if (!await _writeGuarded(c, payload)) return false;
       onProgress?.call(i + 1, total);
     }
     // Commit-Marker
-    await c.write([0x02, slot, 0, 0, 0, 0], withoutResponse: false);
+    if (!await _writeGuarded(c, [0x02, slot, 0, 0, 0, 0])) return false;
     // Mask lokal setzen - Master notifyt nicht (BLE-Coex), wir wollen aber die
     // Slot-Status-Anzeige aktuell halten ohne Reconnect.
     slotOccupiedMask |= (1 << slot);
@@ -1225,7 +1228,7 @@ class EyeBle extends ChangeNotifier {
     final c = _chars[EyeUuids.chrEyeUpload];
     if (c == null) return;
     if (slot < 0 || slot >= kCloudSlotCount) return;
-    await c.write([0x04, slot, 0, 0, 0, 0], withoutResponse: false);
+    await _writeGuarded(c, [0x04, slot, 0, 0, 0, 0]);
   }
 
   /// Loescht den Cloud-Slot auf Master + Slave.
@@ -1234,7 +1237,10 @@ class EyeBle extends ChangeNotifier {
     final c = _chars[EyeUuids.chrEyeUpload];
     if (c == null) return;
     if (slot < 0 || slot >= kCloudSlotCount) return;
-    await c.write([0x03, slot, 0, 0, 0, 0], withoutResponse: false);
+    if (!await _writeGuarded(c, [0x03, slot, 0, 0, 0, 0])) {
+      notifyListeners();
+      return;
+    }
     // Mask lokal nachfuehren - Master notifyt nicht (BLE-Coex), wir muessten sonst
     // bis zum naechsten Connect warten bis "belegt" verschwindet.
     slotOccupiedMask &= ~(1 << slot);
