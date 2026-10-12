@@ -40,11 +40,12 @@ class DiagnosticsScreen extends StatelessWidget {
                 color: kBad.withOpacity(0.15),
                 child: ListTile(
                   leading: const Icon(Icons.error_outline, color: kBad),
-                  title: const Text('Abo fehlgeschlagen'),
+                  title: const Text('Schritte beim Verbinden fehlgeschlagen'),
                   subtitle: Text(
-                    'Diese Characteristics liefern keine Live-Daten: '
-                    '${ble.subscribeErrors.join(", ")}. '
-                    'Die Verbindung laeuft trotzdem.',
+                    '${ble.subscribeErrors.join("\n")}\n\n'
+                    'Die Verbindung laeuft trotzdem - die genannten Werte sind '
+                    'aber nicht aktuell. Die vier Ziffern sind die Kurzform der '
+                    'Characteristic-UUID.',
                   ),
                 ),
               ),

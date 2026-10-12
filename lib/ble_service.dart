@@ -202,6 +202,13 @@ class EyeBle extends ChangeNotifier {
   /// UUID-Kurzformen der Characteristics, deren Abo beim Verbinden scheiterte.
   /// Leer = alles in Ordnung. Wird in der Diagnose angezeigt.
   final List<String> subscribeErrors = [];
+  /// Wo der Verbindungsaufbau gerade steht - wird am Geraete-Eintrag angezeigt.
+  ///
+  /// Im Browser ist das keine Zierde: dort kann jeder einzelne GATT-Schritt lange
+  /// brauchen oder stehenbleiben. Ohne diese Anzeige sieht man nur einen Ladekreis
+  /// und weiss nicht, ob gerade Dienste gesucht, Werte gelesen oder Abos
+  /// eingerichtet werden.
+  String connectStep = '';
   bool authSupported = false;  // false = alte Firmware ohne Auth-Charakteristik
   // Zaehlt hoch bei jedem fehlgeschlagenen Code-Versuch (fuer UI-Feedback).
   int authAttempts = 0;
@@ -272,6 +279,53 @@ class EyeBle extends ChangeNotifier {
   StreamSubscription<List<int>>? _subSlaveLink;
   StreamSubscription<BluetoothConnectionState>? _subConn;
 
+  /// Frist fuer einen einzelnen GATT-Schritt beim Verbinden.
+  ///
+  /// Ueber Web Bluetooth kann ein Schritt haengen bleiben, OHNE einen Fehler zu
+  /// werfen - beobachtet auf dem iPhone (Bluefy): die Verbindung stand laut
+  /// Browser, aber `connectAndDiscover` kam nie zurueck, und die App blieb im
+  /// Suchbildschirm, ohne je die Code-Eingabe zu zeigen. Ein `try/catch` faengt
+  /// genau das NICHT - es faengt Fehler, kein Warten. Deshalb bekommt jeder
+  /// Schritt eine Frist.
+  static const Duration _kGattStep = Duration(seconds: 6);
+
+  /// true, sobald in DIESEM Verbindungsaufbau ein Schritt seine Frist gerissen hat.
+  ///
+  /// Danach gilt eine kurze Frist fuer alle weiteren Schritte. Begruendung: haengt
+  /// ein GATT-Schritt, haengen praktisch immer auch die folgenden - mit der
+  /// vollen Frist summierte sich das beim Verbinden auf ueber eine Minute, in der
+  /// die App nichts anzeigen kann als einen Ladekreis.
+  bool _gattStalled = false;
+
+  /// Kurzform einer UUID fuer Meldungen: "6E400009-..." -> "0009".
+  static String _shortUuid(Guid u) =>
+      u.str.length >= 8 ? u.str.substring(4, 8) : u.str;
+
+  /// Fuehrt einen GATT-Schritt mit Frist aus.
+  ///
+  /// Laeuft die Frist ab oder scheitert der Schritt, wird das vermerkt (sichtbar
+  /// in der Diagnose) und mit null weitergemacht. Eine Verbindung ohne
+  /// Live-Diagnose ist brauchbar - eine haengende ist es nicht.
+  Future<T?> _gatt<T>(String what, Future<T> Function() op,
+      {Duration? limit}) async {
+    connectStep = what;
+    notifyListeners();
+    final frist = limit ??
+        (_gattStalled ? const Duration(seconds: 1) : _kGattStep);
+    try {
+      return await op().timeout(frist);
+    } on TimeoutException {
+      _gattStalled = true;
+      subscribeErrors.add('$what: Zeit abgelaufen');
+      notifyListeners();
+      return null;
+    } catch (e) {
+      subscribeErrors.add('$what: $e');
+      notifyListeners();
+      return null;
+    }
+  }
+
   Future<void> connectAndDiscover(BluetoothDevice d) async {
     // Erst eine eventuell noch offene Verbindung sauber abbauen.
     //
@@ -286,6 +340,12 @@ class EyeBle extends ChangeNotifier {
       await disconnect();
     }
     device = d;
+    // Die Liste HIER leeren, nicht erst in _subscribeNotifies: sonst wuerden die
+    // Lesefehler aus _readAll wieder verschwinden, bevor sie jemand sieht.
+    subscribeErrors.clear();
+    _gattStalled = false;
+    connectStep = 'Verbinden...';
+    notifyListeners();
     await d.connect(timeout: const Duration(seconds: 10), autoConnect: false);
 
     // Groessere BLE-Pakete aushandeln, bevor irgendetwas uebertragen wird.
@@ -299,7 +359,12 @@ class EyeBle extends ChangeNotifier {
     // und nicht fest gesetzt: ein Auge mit aelterer Firmware gewaehrt weiterhin nur 255,
     // und die App muss sich danach richten, statt mit zu grossen Paketen aufzulaufen.
     try {
-      final mtu = await d.requestMtu(512);
+      connectStep = 'Paketgroesse aushandeln...';
+      notifyListeners();
+      // Frist auch hier: im Browser gibt es requestMtu nicht, und ob die
+      // Bibliothek das mit einem Fehler quittiert oder schlicht nie antwortet,
+      // ist nicht garantiert.
+      final mtu = await d.requestMtu(512).timeout(_kGattStep);
       // 3 Byte ATT-Kopf, 6 Byte eigener Kopf. Untergrenze ist der bisherige Wert,
       // damit sich am Verhalten gegenueber alter Firmware nichts aendert.
       _chunkSize = (mtu - 9).clamp(_kChunkSizeMin, _kChunkSizeMax);
@@ -314,17 +379,38 @@ class EyeBle extends ChangeNotifier {
       notifyListeners();
     });
 
-    final services = await d.discoverServices();
+    connectStep = 'Dienste suchen...';
+    notifyListeners();
+    // Dieser Schritt darf NICHT stillschweigend uebergangen werden: ohne
+    // Characteristics kann die App nichts. Statt endlos zu warten bricht sie mit
+    // einer Meldung ab, die sagt, was zu tun ist.
+    final services = await d.discoverServices().timeout(
+      const Duration(seconds: 20),
+      onTimeout: () {
+        connectStep = '';
+        notifyListeners();
+        throw Exception(
+            'Die Dienste des Auges waren nicht lesbar (Zeit abgelaufen). '
+            'Abhilfe: Seite neu laden und erneut verbinden.');
+      },
+    );
     for (final s in services) {
       for (final c in s.characteristics) {
         _chars[c.uuid] = c;
       }
     }
 
+    connectStep = 'Werte lesen...';
+    notifyListeners();
     await _readAll();
+    connectStep = 'Live-Daten abonnieren...';
+    notifyListeners();
     await _subscribeNotifies();
+    connectStep = 'Zugang pruefen...';
+    notifyListeners();
     await _authenticate();   // Zugangscode (Default 123456) automatisch senden
 
+    connectStep = '';
     connected = true;
     notifyListeners();
   }
@@ -388,14 +474,17 @@ class EyeBle extends ChangeNotifier {
     authSupported = true;
     final cs = _chars[EyeUuids.chrAuthStatus];
     if (cs != null) {
-      try {
-        await cs.setNotifyValue(true);
+      // Abo und Lesen sind BEWUSST getrennt: scheitert das Abo (im Browser der
+      // Normalfall), muss der Anfangswert trotzdem gelesen werden - sonst weiss
+      // die App nicht, ob die Verbindung schon autorisiert ist.
+      final ok = await _gatt('Abo Zugang', () => cs.setNotifyValue(true));
+      if (ok != null) {
         _subAuthStatus = cs.lastValueStream.listen((v) {
           if (v.isNotEmpty) { _parseAuthLevel(v[0]); notifyListeners(); }
         });
-        final init = await cs.read();
-        if (init.isNotEmpty) _parseAuthLevel(init[0]);
-      } catch (_) {}
+      }
+      final init = await _gatt('Zugang lesen', () => cs.read());
+      if (init != null && init.isNotEmpty) _parseAuthLevel(init[0]);
     }
     if (_sessionKey != null) {
       final before = authLevel;
@@ -426,7 +515,9 @@ class EyeBle extends ChangeNotifier {
       await Future.delayed(const Duration(milliseconds: 50));
       if (cs == null || authLevel != before) continue;
       try {
-        final v = await cs.read();
+        // Frist pro Versuch: ein haengendes Lesen wuerde sonst die ganze
+        // Warteschleife blockieren, und die Code-Eingabe kaeme nie zum Ende.
+        final v = await cs.read().timeout(const Duration(seconds: 2));
         if (v.isNotEmpty) { _parseAuthLevel(v[0]); notifyListeners(); }
       } catch (_) {
         // Ein fehlgeschlagener Lesevorgang ist kein Grund abzubrechen - beim
@@ -512,6 +603,7 @@ class EyeBle extends ChangeNotifier {
     await _subConn?.cancel();
     _chars.clear();
     try { await device?.disconnect(); } catch (_) {}
+    connectStep = '';
     connected = false;
     authorized = false;
     authLevel = 0;
@@ -593,20 +685,13 @@ class EyeBle extends ChangeNotifier {
       Guid uuid, void Function(List<int>) onData) async {
     final c = _chars[uuid];
     if (c == null) return null;
-    try {
-      await c.setNotifyValue(true);
-      return c.lastValueStream.listen(onData);
-    } catch (e) {
-      final short = uuid.str.length >= 8 ? uuid.str.substring(4, 8) : uuid.str;
-      subscribeErrors.add(short);
-      notifyListeners();
-      return null;
-    }
+    final ok = await _gatt('Abo ${_shortUuid(uuid)}',
+        () => c.setNotifyValue(true));
+    if (ok == null) return null;
+    return c.lastValueStream.listen(onData);
   }
 
   Future<void> _subscribeNotifies() async {
-    subscribeErrors.clear();
-
     _subEyeId = await _subscribe(EyeUuids.chrEyeId, (v) {
       // 2 Bytes [Master, Slave]; aeltere Firmware meldet nur eines fuer beide.
       if (v.isEmpty) return;
@@ -818,18 +903,16 @@ class EyeBle extends ChangeNotifier {
   Future<void> unbindAdmin(List<int> mac)   => _pairCmd(0x06, mac);
 
   Future<int?> _readByte(Guid uuid) async {
-    final c = _chars[uuid];
-    if (c == null) return null;
-    try {
-      final v = await c.read();
-      return v.isNotEmpty ? v[0] : null;
-    } catch (e) { return null; }
+    final v = await _readBytes(uuid);
+    return (v != null && v.isNotEmpty) ? v[0] : null;
   }
 
   Future<List<int>?> _readBytes(Guid uuid) async {
     final c = _chars[uuid];
     if (c == null) return null;
-    try { return await c.read(); } catch (e) { return null; }
+    // Ueber _gatt, damit ein haengendes Lesen den Verbindungsaufbau nicht
+    // aufhaelt und in der Diagnose benannt wird.
+    return _gatt('Lesen ${_shortUuid(uuid)}', () => c.read());
   }
 
   /// Schreibt einen Wert, der je Auge getrennt ist.

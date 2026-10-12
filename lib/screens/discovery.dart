@@ -130,6 +130,14 @@ class _DiscoveryScreenState extends State<DiscoveryScreen>
         withServices: [EyeUuids.svcEyeCtrl],
         timeout: const Duration(seconds: 8),
         androidUsesFineLocation: false,
+        // Nur fuer den Browser, auf Android/iOS wirkungslos.
+        //
+        // Web Bluetooth gibt einer Seite ausschliesslich die Dienste frei, die sie
+        // VORHER angemeldet hat - alles andere ist nach dem Verbinden einfach nicht
+        // vorhanden. Angemeldet war bisher nur svcEyeCtrl, weshalb der
+        // Diagnose-Dienst (Funk-Status, Verbindungsqualitaet, Upload-Quittungen)
+        // im Browser fehlte.
+        webOptionalServices: [EyeUuids.svcEyeCtrl, EyeUuids.svcDiag],
       );
     } catch (e) {
       if (mounted) setState(() => _error = "Scan-Fehler: $e");
@@ -411,6 +419,28 @@ class _DiscoveryScreenState extends State<DiscoveryScreen>
                                 fontSize: 12, color: Colors.white.withOpacity(.5))),
                       ],
                     ),
+                    // Waehrend des Verbindens zeigen, WOBEI es gerade steht.
+                    //
+                    // Der Ladekreis allein sagte nichts: auf dem iPhone blieb der
+                    // Bildschirm stehen, und niemand konnte sehen, ob es an den
+                    // Diensten, am Lesen oder an den Abos lag.
+                    if (connecting)
+                      ListenableBuilder(
+                        listenable: widget.ble,
+                        builder: (_, __) => Padding(
+                          padding: const EdgeInsets.only(top: 4),
+                          child: Text(
+                            widget.ble.connectStep.isEmpty
+                                ? 'Verbinden...'
+                                : widget.ble.connectStep,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                                fontSize: 12,
+                                color: kAccentGlow.withOpacity(.85)),
+                          ),
+                        ),
+                      ),
                   ],
                 ),
               ),
