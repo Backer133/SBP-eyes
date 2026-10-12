@@ -354,7 +354,19 @@ class _EyeGrid extends StatelessWidget {
             borderRadius: BorderRadius.circular(18),
             child: InkWell(
               borderRadius: BorderRadius.circular(18),
-              onTap: () => ble.setEyeId(_target, i),
+              onTap: () async {
+                // Ergebnis ABWARTEN und einen Fehlschlag auch sagen. Vorher war
+                // das ein blankes `() => ble.setEyeId(...)`: ging der Befehl
+                // nicht durch, passierte nichts und niemand erfuhr warum.
+                final ok = await ble.setEyeId(_target, i);
+                if (ok || !context.mounted) return;
+                ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+                  backgroundColor: kBad,
+                  duration: const Duration(seconds: 6),
+                  content: Text(ble.lastError ??
+                      'Das Auge hat den Befehl nicht angenommen.'),
+                ));
+              },
               onLongPress: isCloud ? () => onSlotActions(cloudSlot) : null,
               child: Padding(
                 padding: const EdgeInsets.all(8),

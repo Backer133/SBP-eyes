@@ -218,6 +218,13 @@ class EyeBle extends ChangeNotifier {
   bool authNoAnswer = false;
   /// true, sobald die Werte und Abos nach der Autorisierung geholt wurden.
   bool _loaded = false;
+  /// Grund, warum der letzte Befehl nicht ankam - null, wenn alles lief.
+  ///
+  /// Bisher verschwanden diese Fehler restlos: `onTap: () => ble.setEyeId(...)`
+  /// wartet das Ergebnis nicht ab, also landete eine Ausnahme in einem Future,
+  /// den niemand liest. Auf dem iPhone sah das so aus, dass ein Antippen einfach
+  /// nichts tat - ohne Meldung, ohne Eintrag, ohne Anhaltspunkt.
+  String? lastError;
   bool authSupported = false;  // false = alte Firmware ohne Auth-Charakteristik
   // Zaehlt hoch bei jedem fehlgeschlagenen Code-Versuch (fuer UI-Feedback).
   int authAttempts = 0;
@@ -306,6 +313,25 @@ class EyeBle extends ChangeNotifier {
   /// die App nichts anzeigen kann als einen Ladekreis.
   bool _gattStalled = false;
 
+  /// Haelt die GATT-Vorgaenge in einer Reihe: einer nach dem anderen.
+  ///
+  /// Web Bluetooth laesst pro Geraet nur EINEN Vorgang gleichzeitig zu. Kommt ein
+  /// zweiter dazwischen, wirft er "GATT operation already in progress" - und das
+  /// trifft genau die Stellen, die ihr Ergebnis nicht abwarten (ein Antippen im
+  /// Augenraster, ein Schieberegler). Auf Android fiel das nie auf, weil dort der
+  /// Systemdienst die Vorgaenge selbst einreiht.
+  ///
+  /// Jeder hier eingereihte Vorgang MUSS eine eigene Frist haben, sonst blockiert
+  /// ein haengender alle folgenden. Das ist der Fall: eingereiht wird nur ueber
+  /// _gatt und _writeGuarded, und beide haben eine.
+  Future<void> _gattQueue = Future.value();
+  Future<T> _serialize<T>(Future<T> Function() op) {
+    final vorher = _gattQueue;
+    final fertig = Completer<void>();
+    _gattQueue = fertig.future;
+    return vorher.then((_) => op()).whenComplete(fertig.complete);
+  }
+
   /// Kurzform einer UUID fuer Meldungen: "6E400009-..." -> "0009".
   static String _shortUuid(Guid u) =>
       u.str.length >= 8 ? u.str.substring(4, 8) : u.str;
@@ -322,17 +348,24 @@ class EyeBle extends ChangeNotifier {
     final frist = limit ??
         (_gattStalled ? const Duration(seconds: 1) : _kGattStep);
     try {
-      return await op().timeout(frist);
+      return await _serialize(() => op().timeout(frist));
     } on TimeoutException {
       _gattStalled = true;
-      subscribeErrors.add('$what: Zeit abgelaufen');
-      notifyListeners();
+      _note('$what: Zeit abgelaufen');
       return null;
     } catch (e) {
-      subscribeErrors.add('$what: $e');
-      notifyListeners();
+      _note('$what: $e');
       return null;
     }
+  }
+
+  /// Vermerkt einen fehlgeschlagenen Schritt fuer die Diagnose.
+  ///
+  /// Mit Deckel: die Lesefunktionen laufen auch im laufenden Betrieb hier durch,
+  /// und eine Liste, die unbegrenzt waechst, waere in der Diagnose unlesbar.
+  void _note(String msg) {
+    if (subscribeErrors.length < 20) subscribeErrors.add(msg);
+    notifyListeners();
   }
 
   Future<void> connectAndDiscover(BluetoothDevice d) async {
@@ -494,9 +527,12 @@ class EyeBle extends ChangeNotifier {
     isAdmin    = level >= 2;
   }
 
-  Future<void> _writeKey(BluetoothCharacteristic c, int key) async {
+  /// Schreibt einen Zugangscode. Ueber _writeGuarded, damit der Vorgang eine
+  /// Frist hat und sich einreiht - ein Schreibvorgang ohne beides konnte den
+  /// ganzen Kanal belegen und alle folgenden Lesevorgaenge scheitern lassen.
+  Future<bool> _writeKey(BluetoothCharacteristic c, int key) {
     final b = ByteData(4)..setUint32(0, key, Endian.little);
-    await c.write(b.buffer.asUint8List(), withoutResponse: false);
+    return _writeGuarded(c, b.buffer.asUint8List());
   }
 
   // Beim Connect: Auth-Status abonnieren. Es wird KEIN gespeicherter Code mehr
@@ -563,18 +599,13 @@ class EyeBle extends ChangeNotifier {
       await Future.delayed(const Duration(milliseconds: 50));
       if (authLevel != before) { heard = true; break; }   // Benachrichtigung war da
       if (cs == null) continue;
-      try {
-        // Frist pro Versuch: ein haengendes Lesen wuerde sonst die ganze
-        // Warteschleife blockieren, und die Code-Eingabe kaeme nie zum Ende.
-        final v = await cs.read().timeout(const Duration(seconds: 2));
-        if (v.isNotEmpty) {
-          heard = true;
-          _parseAuthLevel(v[0]);
-          notifyListeners();
-        }
-      } catch (_) {
-        // Ein fehlgeschlagener Lesevorgang ist kein Grund abzubrechen - beim
-        // naechsten Durchgang kann es klappen.
+      // Ueber _readBytes: Frist und Einreihung inklusive. Ein fehlgeschlagener
+      // Versuch ist kein Grund abzubrechen - beim naechsten kann es klappen.
+      final v = await _readBytes(EyeUuids.chrAuthStatus);
+      if (v != null && v.isNotEmpty) {
+        heard = true;
+        _parseAuthLevel(v[0]);
+        notifyListeners();
       }
     }
     return heard || authLevel != before;
@@ -592,9 +623,7 @@ class EyeBle extends ChangeNotifier {
     // Antwort der Firmware da ist - isAdmin waere dann noch nicht gesetzt.
     final before = authLevel;
     authNoAnswer = false;
-    try {
-      await _writeKey(c, key).timeout(const Duration(seconds: 8));
-    } catch (_) {
+    if (!await _writeKey(c, key)) {
       // Der Code ist nie beim Auge angekommen - das ist kein Fehlversuch.
       authNoAnswer = true;
       notifyListeners();
@@ -798,31 +827,24 @@ class EyeBle extends ChangeNotifier {
       notifyListeners();
     });
     // Startwert des Kopplungs-Zustands, damit der Screen nicht bei Null beginnt.
-    final cps = _chars[EyeUuids.chrPairState];
-    if (cps != null) {
-      try {
-        final init = await cps.read();
-        if (init.length >= 9) _parsePairState(init);
-      } catch (_) {}
-    }
+    // Ueber _readBytes, nicht direkt: nur so bekommt der Vorgang eine Frist und
+    // reiht sich ein. Ein Lesevorgang ohne Frist in der Reihe wuerde alle
+    // folgenden blockieren.
+    final init = await _readBytes(EyeUuids.chrPairState);
+    if (init != null && init.length >= 9) _parsePairState(init);
 
     // --- Ausrichtung: einmal lesen, damit die Regler richtig starten ---
-    final cg = _chars[EyeUuids.chrEyeGeom];
-    if (cg != null) {
-      try {
-        final v = await cg.read();
-        if (v.length >= 4) {
-          eyeYOff = [_s8(v[0]), _s8(v[2])];
-          eyeVisH = [v[1], v[3]];
-        }
-        // Versatz und Groesse kamen spaeter dazu und haengen hinten dran. Eine
-        // aeltere Firmware antwortet mit vier Bytes - dann bleibt es bei den
-        // Vorgaben, statt dass die Regler auf Null springen.
-        if (v.length >= 8) {
-          eyeXOff = [_s8(v[4]), _s8(v[6])];
-          eyeZoom = [v[5], v[7]];
-        }
-      } catch (_) {}
+    final v = await _readBytes(EyeUuids.chrEyeGeom);
+    if (v != null && v.length >= 4) {
+      eyeYOff = [_s8(v[0]), _s8(v[2])];
+      eyeVisH = [v[1], v[3]];
+      // Versatz und Groesse kamen spaeter dazu und haengen hinten dran. Eine
+      // aeltere Firmware antwortet mit vier Bytes - dann bleibt es bei den
+      // Vorgaben, statt dass die Regler auf Null springen.
+      if (v.length >= 8) {
+        eyeXOff = [_s8(v[4]), _s8(v[6])];
+        eyeZoom = [v[5], v[7]];
+      }
     }
 
     // --- Bewegung: nur lesen, KEIN Abo. NimBLE haelt pro Verbindung nur begrenzt
@@ -989,11 +1011,48 @@ class EyeBle extends ChangeNotifier {
   ///
   /// [target] 0 = Master, 1 = Slave, 2 = beide. Bei "beide" geht EIN Byte raus, genau
   /// wie frueher - das versteht auch ein Auge mit aelterer Firmware.
+  /// Schreibt mit Frist, eingereiht, und behaelt den Grund eines Fehlschlags.
+  ///
+  /// Gibt true zurueck, wenn das Auge den Schreibvorgang bestaetigt hat. Das sagt
+  /// NICHT, dass die Firmware ihn auch ausgefuehrt hat - sie verwirft steuernde
+  /// Writes still, solange die Verbindung nicht autorisiert ist. Dafuer gibt es
+  /// die Nachkontrolle in setEyeId.
+  Future<bool> _writeGuarded(BluetoothCharacteristic c, List<int> data) async {
+    try {
+      await _serialize(() => c
+          .write(data, withoutResponse: false)
+          .timeout(const Duration(seconds: 6)));
+      lastError = null;
+      return true;
+    } on TimeoutException {
+      lastError = 'Das Auge hat nicht geantwortet (Zeit abgelaufen).';
+      _note('Schreiben ${_shortUuid(c.uuid)}: Zeit abgelaufen');
+      return false;
+    } catch (e) {
+      lastError = 'Schreiben fehlgeschlagen: $e';
+      _note('Schreiben ${_shortUuid(c.uuid)}: $e');
+      return false;
+    }
+  }
+
   Future<bool> _writePair(Guid id, int target, int value, List<int> state) async {
-    if (locked) return false;   // Firmware ignoriert den Write ohnehin
+    if (locked) {
+      lastError = 'Nicht autorisiert - Zugangscode eingeben.';
+      notifyListeners();
+      return false;
+    }
     final c = _chars[id];
-    if (c == null) return false;
-    await c.write(target == kBeide ? [value] : [target, value], withoutResponse: false);
+    if (c == null) {
+      lastError = 'Diese Funktion fehlt in der Firmware des Auges.';
+      notifyListeners();
+      return false;
+    }
+    final ok = await _writeGuarded(
+        c, target == kBeide ? [value] : [target, value]);
+    if (!ok) {
+      notifyListeners();
+      return false;
+    }
     if (target == kBeide) {
       state[kMaster] = value;
       state[kSlave]  = value;
@@ -1004,8 +1063,34 @@ class EyeBle extends ChangeNotifier {
     return true;
   }
 
-  Future<void> setEyeId(int target, int id) =>
-      _writePair(EyeUuids.chrEyeId, target, id, eyeId);
+  /// Setzt die Augen-Nummer und PRUEFT NACH, ob die Verbindung noch autorisiert ist.
+  ///
+  /// Die Nachkontrolle ist noetig, weil die Firmware steuernde Writes STILL
+  /// verwirft, wenn ihr Auth-Level fuer die Verbindung 0 ist (REQUIRE_AUTH im
+  /// Master). Auf BLE-Ebene gilt der Write trotzdem als geglueckt - die App
+  /// erfuhr davon nichts, und das Antippen eines Auges tat schlicht nichts.
+  ///
+  /// CHR_AUTH_STATUS ist dafuer der verlaessliche Zeuge: die Firmware setzt den
+  /// Wert selbst, kein Client kann ihn beschreiben. Die Augen-Nummer
+  /// zurueckzulesen taugt NICHT - die BLE-Bibliothek speichert bei einem Write
+  /// den geschriebenen Wert, die Antwort waere also auch dann der neue Wert, wenn
+  /// die Firmware ihn verworfen hat.
+  Future<bool> setEyeId(int target, int id) async {
+    if (!await _writePair(EyeUuids.chrEyeId, target, id, eyeId)) return false;
+    final lvl = await _readByte(EyeUuids.chrAuthStatus);
+    if (lvl != null) {
+      _parseAuthLevel(lvl);
+      if (locked) {
+        // Die Firmware hat den Befehl verworfen. Das Gate kommt von selbst
+        // wieder (HomeScreen zeigt es bei `locked`), hier nur der Grund.
+        lastError = 'Das Auge hat die Verbindung nicht mehr als autorisiert '
+            'gefuehrt und den Befehl verworfen. Zugangscode erneut eingeben.';
+        notifyListeners();
+        return false;
+      }
+    }
+    return true;
+  }
 
   /// Setzt die Display-Helligkeit beider Augen (0..255). Der Master stellt sein
   /// eigenes Backlight und schiebt den Wert per ConfigMsg an den Slave weiter.
