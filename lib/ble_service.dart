@@ -539,8 +539,65 @@ class EyeBle extends ChangeNotifier {
   /// zweimal dieselbe Gruppe (ein Rebuild genuegt), wartet der zweite Aufruf auf
   /// denselben Vorgang statt einen zweiten anzustossen.
   final Map<String, Future<void>> _groups = {};
-  Future<void> _once(String name, Future<void> Function() body) =>
-      _groups.putIfAbsent(name, body);
+  Future<void> _once(String name, Future<void> Function() body) {
+    final f = _groups.putIfAbsent(name, body);
+    _startPolling();
+    return f;
+  }
+
+  // ===== Nachfragen statt lauschen (nur im Browser) =====
+
+  Timer? _poll;
+
+  /// Startet die Abfrage, sobald es etwas abzufragen gibt.
+  ///
+  /// Nur im Browser: dort gibt es keine Benachrichtigungen (siehe _subscribe).
+  /// Abgefragt wird ausschliesslich, was zu einer geoeffneten Gruppe gehoert -
+  /// eine Abfrage aller Werte im Sekundentakt waere auf dem schmalen Web-Kanal
+  /// genau die Last, die ihn vorher umgebracht hat.
+  void _startPolling() {
+    if (!kIsWeb || _poll != null || _groups.isEmpty) return;
+    _poll = Timer.periodic(const Duration(milliseconds: 1500), (_) => _pollTick());
+  }
+
+  bool _polling = false;
+  Future<void> _pollTick() async {
+    if (_polling || channelDead || locked || !connected) return;
+    _polling = true;
+    try {
+      if (_groups.containsKey('diag')) {
+        final link = await _readByte(EyeUuids.chrSlaveLink);
+        if (link != null) slaveLinked = link == 1;
+        final diag = await _readBytes(EyeUuids.chrLinkDiag);
+        if (diag != null && diag.length >= 4) _parseLinkDiag(diag);
+      }
+      if (_groups.containsKey('upload')) {
+        final rcp = await _readBytes(EyeUuids.chrSlaveReceipt);
+        if (rcp != null && rcp.length >= 6) _parseReceipt(rcp);
+      }
+      if (_groups.containsKey('pairing')) {
+        final st = await _readBytes(EyeUuids.chrPairState);
+        if (st != null && st.length >= 9) _parsePairState(st);
+        final f = await _readBytes(EyeUuids.chrPairFound);
+        if (f != null && f.length >= 8) _addFound(f);
+      }
+      notifyListeners();
+    } finally {
+      _polling = false;
+    }
+  }
+
+  /// Einen gemeldeten Slave aufnehmen, Doppelte verwerfen.
+  ///
+  /// Als eigene Funktion, weil sie aus zwei Richtungen kommt: per
+  /// Benachrichtigung (App) und per Abfrage (Browser).
+  void _addFound(List<int> v) {
+    final mac = v.sublist(0, 6);
+    if (pairingFound.any((f) => _macEq(f.mac, mac))) return;
+    final rssi = v[6] > 127 ? v[6] - 256 : v[6];   // int8
+    pairingFound.add(FoundSlave(
+      mac, rssi, (v[7] & 0x01) != 0, (v[7] & 0x02) != 0));
+  }
 
   /// Funk-Status und Verbindungsqualitaet. Nur die Diagnose zeigt das.
   Future<void> ensureDiag() => _once('diag', () async {
@@ -572,11 +629,7 @@ class EyeBle extends ChangeNotifier {
   Future<void> ensurePairing() => _once('pairing', () async {
     _subPairFound = await _subscribe(EyeUuids.chrPairFound, (v) {
       if (v.length < 8) return;
-      final mac = v.sublist(0, 6);
-      if (pairingFound.any((f) => _macEq(f.mac, mac))) return;
-      final rssi = v[6] > 127 ? v[6] - 256 : v[6];   // int8
-      pairingFound.add(FoundSlave(
-        mac, rssi, (v[7] & 0x01) != 0, (v[7] & 0x02) != 0));
+      _addFound(v);
       notifyListeners();
     });
     _subPairState = await _subscribe(EyeUuids.chrPairState, (v) {
@@ -677,11 +730,19 @@ class EyeBle extends ChangeNotifier {
       // Abo und Lesen sind BEWUSST getrennt: scheitert das Abo (im Browser der
       // Normalfall), muss der Anfangswert trotzdem gelesen werden - sonst weiss
       // die App nicht, ob die Verbindung schon autorisiert ist.
-      final ok = await _gatt('Abo Zugang', () => cs.setNotifyValue(true));
-      if (ok != null) {
-        _subAuthStatus = cs.lastValueStream.listen((v) {
-          if (v.isNotEmpty) { _parseAuthLevel(v[0]); notifyListeners(); }
-        });
+      // Im Browser NICHT abonnieren - genau dieser Aufruf hing auf dem iPhone
+      // 15 s lang und riss den Kanal mit. Der Zugangs-Stand wird dort ohnehin
+      // aktiv abgefragt (_awaitAuthLevelChange), das Abo waere nur Beschleunigung
+      // gewesen. Siehe _subscribe() fuer die Messung.
+      if (!kIsWeb) {
+        final ok = await _gatt('Abo Zugang', () => cs.setNotifyValue(true));
+        if (ok != null) {
+          _subAuthStatus = cs.lastValueStream.listen((v) {
+            if (v.isNotEmpty) { _parseAuthLevel(v[0]); notifyListeners(); }
+          });
+        }
+      } else {
+        EyeLog.add('Abo Zugang  im Browser ausgelassen (wird abgefragt)');
       }
       final init = await _gatt('Zugang lesen', () => cs.read());
       if (init != null && init.isNotEmpty) _parseAuthLevel(init[0]);
@@ -716,6 +777,7 @@ class EyeBle extends ChangeNotifier {
   Future<bool> _awaitAuthLevelChange(int before, {int tries = 20}) async {
     final cs = _chars[EyeUuids.chrAuthStatus];
     bool heard = false;
+    int gesehen = 0;
     for (int i = 0; i < tries && authLevel == before; i++) {
       await Future.delayed(const Duration(milliseconds: 50));
       if (authLevel != before) { heard = true; break; }   // Benachrichtigung war da
@@ -724,9 +786,14 @@ class EyeBle extends ChangeNotifier {
       // Versuch ist kein Grund abzubrechen - beim naechsten kann es klappen.
       final v = await _readBytes(EyeUuids.chrAuthStatus);
       if (v != null && v.isNotEmpty) {
+        gesehen++;
         heard = true;
         _parseAuthLevel(v[0]);
         notifyListeners();
+        // Dreimal denselben Stand gelesen heisst: das Auge hat entschieden, und
+        // zwar gegen uns. Weiterzufragen verlaengert nur die Wartezeit - im
+        // Browser kostet jede Abfrage ein paar hundert Millisekunden.
+        if (gesehen >= 3 && authLevel == before) break;
       }
     }
     return heard || authLevel != before;
@@ -830,6 +897,8 @@ class EyeBle extends ChangeNotifier {
     await _subPairFound?.cancel();
     await _subPairState?.cancel();
     await _subConn?.cancel();
+    _poll?.cancel();
+    _poll = null;
     _chars.clear();
     try { await device?.disconnect(); } catch (_) {}
     _loaded = false;
@@ -914,6 +983,19 @@ class EyeBle extends ChangeNotifier {
       Guid uuid, void Function(List<int>) onData) async {
     final c = _chars[uuid];
     if (c == null) return null;
+    // Im Browser NICHT abonnieren. Gemessen auf dem iPhone (Bluefy): der erste
+    // setNotifyValue kehrte nie zurueck - keine Fehlermeldung, keine Antwort,
+    // nach 15 s griff die Frist. Danach war der Kanal belegt und jeder weitere
+    // Vorgang verloren, also auch die Eingabe des Zugangscodes.
+    //
+    // Lesen und Schreiben funktionieren einwandfrei (Verbinden 0,8 s,
+    // Dienstesuche 2,0 s, beide Dienste da). Es ist allein das Abonnieren, das
+    // die Bruecke von Web Bluetooth zu iOS nicht durchreicht. Statt darauf zu
+    // warten, fragt die App dort regelmaessig nach - siehe _pollTick().
+    if (kIsWeb) {
+      EyeLog.add('Abo ${_shortUuid(uuid)}  im Browser ausgelassen (wird abgefragt)');
+      return null;
+    }
     final ok = await _gatt('Abo ${_shortUuid(uuid)}',
         () => c.setNotifyValue(true));
     if (ok == null) return null;
