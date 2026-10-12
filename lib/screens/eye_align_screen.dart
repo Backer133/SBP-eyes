@@ -50,7 +50,13 @@ class _EyeAlignScreenState extends State<EyeAlignScreen> {
   @override
   void initState() {
     super.initState();
-    WidgetsBinding.instance.addPostFrameCallback((_) => widget.ble.setEyeGuides(true));
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      // Die Reglerstaende kommen erst hier vom Auge - siehe ensureGeom().
+      await widget.ble.ensureGeom();
+      if (!mounted) return;
+      setState(() {});
+      widget.ble.setEyeGuides(true);
+    });
   }
 
   @override

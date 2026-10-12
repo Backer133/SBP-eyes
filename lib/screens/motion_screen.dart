@@ -34,6 +34,15 @@ class _MotionScreenState extends State<MotionScreen> {
 
   AnimCfg? get _cfg => _preview ?? widget.ble.animCfg;
 
+  @override
+  void initState() {
+    super.initState();
+    // Die Bewegungs-Einstellungen kommen erst hier vom Auge: sie werden nicht
+    // mehr beim Verbinden mitgelesen, damit das Anmelden nicht auf Werte wartet,
+    // die nur dieser Bildschirm anzeigt (siehe EyeBle.ensureGeom).
+    WidgetsBinding.instance.addPostFrameCallback((_) => widget.ble.ensureGeom());
+  }
+
   void _live(AnimCfg next) {
     setState(() => _preview = next);
     widget.ble.setAnimCfg(next, persist: false);

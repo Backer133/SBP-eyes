@@ -295,23 +295,28 @@ class EyeBle extends ChangeNotifier {
   StreamSubscription<List<int>>? _subSlaveLink;
   StreamSubscription<BluetoothConnectionState>? _subConn;
 
-  /// Frist fuer einen einzelnen GATT-Schritt beim Verbinden.
+  /// Frist fuer einen einzelnen GATT-Vorgang.
   ///
-  /// Ueber Web Bluetooth kann ein Schritt haengen bleiben, OHNE einen Fehler zu
+  /// Ueber Web Bluetooth kann ein Vorgang haengen bleiben, OHNE einen Fehler zu
   /// werfen - beobachtet auf dem iPhone (Bluefy): die Verbindung stand laut
-  /// Browser, aber `connectAndDiscover` kam nie zurueck, und die App blieb im
-  /// Suchbildschirm, ohne je die Code-Eingabe zu zeigen. Ein `try/catch` faengt
-  /// genau das NICHT - es faengt Fehler, kein Warten. Deshalb bekommt jeder
-  /// Schritt eine Frist.
-  static const Duration _kGattStep = Duration(seconds: 6);
-
-  /// true, sobald in DIESEM Verbindungsaufbau ein Schritt seine Frist gerissen hat.
+  /// Browser, aber `connectAndDiscover` kam nie zurueck. Ein `try/catch` faengt
+  /// genau das NICHT - es faengt Fehler, kein Warten. Deshalb eine Frist.
   ///
-  /// Danach gilt eine kurze Frist fuer alle weiteren Schritte. Begruendung: haengt
-  /// ein GATT-Schritt, haengen praktisch immer auch die folgenden - mit der
-  /// vollen Frist summierte sich das beim Verbinden auf ueber eine Minute, in der
-  /// die App nichts anzeigen kann als einen Ladekreis.
-  bool _gattStalled = false;
+  /// Sie ist BEWUSST reichlich. Eine abgelaufene Frist bricht den Vorgang nur auf
+  /// unserer Seite ab; im Browser bleibt er anhaengig, und weil Web Bluetooth pro
+  /// Geraet nur einen Vorgang zulaesst, wartet danach jeder weitere hinter einem
+  /// Vorgang, der nie fertig wird. Eine zu knappe Frist macht aus einem langsamen
+  /// Kanal also einen toten. Ein frueherer Versuch mit 6 s und einer auf 1 s
+  /// verkuerzten Folgefrist tat genau das: nach dem Anmelden ging kein einziger
+  /// Befehl mehr durch.
+  static const Duration _kGattStep = Duration(seconds: 15);
+
+  /// true, sobald ein Vorgang seine Frist gerissen hat.
+  ///
+  /// Ab da ist der Kanal unbrauchbar (siehe oben) - weitere Vorgaenge wuerden nur
+  /// in dieselbe Frist laufen und die Sache verschleiern. Sie werden deshalb
+  /// sofort abgewiesen, mit einer Meldung, die zum Neuverbinden auffordert.
+  bool channelDead = false;
 
   /// Haelt die GATT-Vorgaenge in einer Reihe: einer nach dem anderen.
   ///
@@ -343,20 +348,27 @@ class EyeBle extends ChangeNotifier {
   /// Live-Diagnose ist brauchbar - eine haengende ist es nicht.
   Future<T?> _gatt<T>(String what, Future<T> Function() op,
       {Duration? limit}) async {
+    if (channelDead) return null;
     connectStep = what;
     notifyListeners();
-    final frist = limit ??
-        (_gattStalled ? const Duration(seconds: 1) : _kGattStep);
     try {
-      return await _serialize(() => op().timeout(frist));
+      return await _serialize(() => op().timeout(limit ?? _kGattStep));
     } on TimeoutException {
-      _gattStalled = true;
-      _note('$what: Zeit abgelaufen');
+      _channelIsDead('$what: Zeit abgelaufen');
       return null;
     } catch (e) {
       _note('$what: $e');
       return null;
     }
+  }
+
+  /// Erklaert den Kanal fuer unbrauchbar. Nur aus einer abgelaufenen Frist
+  /// heraus - ein geworfener Fehler laesst den Kanal in Ruhe.
+  void _channelIsDead(String warum) {
+    channelDead = true;
+    lastError = 'Die Verbindung antwortet nicht mehr. Bitte trennen und neu '
+        'verbinden ($warum).';
+    _note(warum);
   }
 
   /// Vermerkt einen fehlgeschlagenen Schritt fuer die Diagnose.
@@ -382,11 +394,12 @@ class EyeBle extends ChangeNotifier {
       await disconnect();
     }
     device = d;
-    // Die Liste HIER leeren, nicht erst in _subscribeNotifies: sonst wuerden die
-    // Lesefehler aus _readAll wieder verschwinden, bevor sie jemand sieht.
+    // Die Liste HIER leeren: sonst wuerden die Lesefehler aus loadAll wieder
+    // verschwinden, bevor sie jemand in der Diagnose sieht.
     subscribeErrors.clear();
-    _gattStalled = false;
+    channelDead = false;
     _loaded = false;
+    _groups.clear();
     connectStep = 'Verbinden...';
     notifyListeners();
     await d.connect(timeout: const Duration(seconds: 10), autoConnect: false);
@@ -472,12 +485,18 @@ class EyeBle extends ChangeNotifier {
     if (!locked) await loadAll();
   }
 
-  /// Holt alles, was erst NACH der Autorisierung gebraucht wird: die Werte der
-  /// Oberflaeche und die Live-Abos.
+  /// Holt, was der Hauptbildschirm braucht - und nur das.
   ///
-  /// Wird vom Sperr-Bildschirm aufgerufen, sobald der Code angenommen wurde -
+  /// Wird vom Sperr-Bildschirm aufgerufen, sobald der Code angenommen wurde,
   /// und zwar abgewartet, damit der Hauptbildschirm nicht erst mit Vorgabewerten
   /// erscheint und dann nachtraeglich umspringt.
+  ///
+  /// Alles Weitere holen die ensure*-Gruppen, wenn der jeweilige Bildschirm
+  /// aufgeht. Grund: ueber Web Bluetooth laeuft jeder Lese- und Abo-Vorgang
+  /// einzeln hintereinander durch denselben Kanal. Vorher standen hier zehn
+  /// Lesevorgaenge und sieben Abos - sieben davon fuer Werte, die ausschliesslich
+  /// die Diagnose, die Kopplung, die Ausrichtung oder der Cloud-Upload anzeigen.
+  /// Wer nur ein Auge umschalten will, wartete auf sie alle.
   Future<void> loadAll() async {
     if (_loaded) return;
     _loaded = true;
@@ -486,10 +505,96 @@ class EyeBle extends ChangeNotifier {
     await _readAll();
     connectStep = 'Live-Daten abonnieren...';
     notifyListeners();
-    await _subscribeNotifies();
+    // Das einzige Abo, das der Hauptbildschirm braucht: das zweite Auge kann
+    // seine Nummer auch von sich aus melden (nach einem Neustart des Slaves).
+    _subEyeId = await _subscribe(EyeUuids.chrEyeId, (v) {
+      // 2 Bytes [Master, Slave]; aeltere Firmware meldet nur eines fuer beide.
+      if (v.isEmpty) return;
+      eyeId = v.length >= 2 ? [v[0], v[1]] : [v[0], v[0]];
+      notifyListeners();
+    });
     connectStep = '';
     notifyListeners();
   }
+
+  /// Gruppen, die beim ersten Bedarf genau einmal laufen.
+  ///
+  /// Als Map von Futures, nicht als Flags: ruft ein Bildschirm beim Aufbauen
+  /// zweimal dieselbe Gruppe (ein Rebuild genuegt), wartet der zweite Aufruf auf
+  /// denselben Vorgang statt einen zweiten anzustossen.
+  final Map<String, Future<void>> _groups = {};
+  Future<void> _once(String name, Future<void> Function() body) =>
+      _groups.putIfAbsent(name, body);
+
+  /// Funk-Status und Verbindungsqualitaet. Nur die Diagnose zeigt das.
+  Future<void> ensureDiag() => _once('diag', () async {
+    final link = await _readByte(EyeUuids.chrSlaveLink);
+    if (link != null) slaveLinked = link == 1;
+    final diag = await _readBytes(EyeUuids.chrLinkDiag);
+    if (diag != null && diag.length >= 4) _parseLinkDiag(diag);
+    _subSlaveLink = await _subscribe(EyeUuids.chrSlaveLink, (v) {
+      if (v.isNotEmpty) { slaveLinked = v[0] == 1; notifyListeners(); }
+    });
+    _subLinkDiag = await _subscribe(EyeUuids.chrLinkDiag, (v) {
+      if (v.length >= 4) { _parseLinkDiag(v); notifyListeners(); }
+    });
+    notifyListeners();
+  });
+
+  /// Quittungen des zweiten Auges. Nur der Cloud-Upload zeigt das - und er
+  /// braucht sie wirklich, sonst steht der Fortschritt still.
+  Future<void> ensureUpload() => _once('upload', () async {
+    final rcp = await _readBytes(EyeUuids.chrSlaveReceipt);
+    if (rcp != null && rcp.length >= 6) _parseReceipt(rcp);
+    _subSlaveReceipt = await _subscribe(EyeUuids.chrSlaveReceipt, (v) {
+      if (v.length >= 6) { _parseReceipt(v); notifyListeners(); }
+    });
+    notifyListeners();
+  });
+
+  /// Kopplung: Funde und Zustand. Nur der Kopplungs-Bildschirm zeigt das.
+  Future<void> ensurePairing() => _once('pairing', () async {
+    _subPairFound = await _subscribe(EyeUuids.chrPairFound, (v) {
+      if (v.length < 8) return;
+      final mac = v.sublist(0, 6);
+      if (pairingFound.any((f) => _macEq(f.mac, mac))) return;
+      final rssi = v[6] > 127 ? v[6] - 256 : v[6];   // int8
+      pairingFound.add(FoundSlave(
+        mac, rssi, (v[7] & 0x01) != 0, (v[7] & 0x02) != 0));
+      notifyListeners();
+    });
+    _subPairState = await _subscribe(EyeUuids.chrPairState, (v) {
+      if (v.length < 9) return;
+      _parsePairState(v);
+      notifyListeners();
+    });
+    // Startwert, damit der Bildschirm nicht bei Null beginnt.
+    final init = await _readBytes(EyeUuids.chrPairState);
+    if (init != null && init.length >= 9) _parsePairState(init);
+    notifyListeners();
+  });
+
+  /// Ausrichtung und Bewegung. Nur die beiden Einstell-Bildschirme zeigen das.
+  Future<void> ensureGeom() => _once('geom', () async {
+    final v = await _readBytes(EyeUuids.chrEyeGeom);
+    if (v != null && v.length >= 4) {
+      eyeYOff = [_s8(v[0]), _s8(v[2])];
+      eyeVisH = [v[1], v[3]];
+      // Versatz und Groesse kamen spaeter dazu und haengen hinten dran. Eine
+      // aeltere Firmware antwortet mit vier Bytes - dann bleibt es bei den
+      // Vorgaben, statt dass die Regler auf Null springen.
+      if (v.length >= 8) {
+        eyeXOff = [_s8(v[4]), _s8(v[6])];
+        eyeZoom = [v[5], v[7]];
+      }
+    }
+    // Bewegung: nur lesen, KEIN Abo. NimBLE haelt pro Verbindung nur begrenzt
+    // viele CCCD-Slots vor (Standard 8) - ein neuntes Abo scheitert mit
+    // GATT_WRITE_NOT_PERMITTED und riss die ganze Verbindung mit. Den Stand
+    // holen wir nach jedem Schreibvorgang aktiv ab.
+    await _readAnimCfg();
+    notifyListeners();
+  });
 
   // ===== Zugangsschutz =====
 
@@ -684,6 +789,11 @@ class EyeBle extends ChangeNotifier {
   Future<void> reconnect() async {
     if (device == null) throw Exception('Kein vorheriges Geraet bekannt');
     await connectAndDiscover(device!);
+    // Die ensure*-Gruppen gelten pro Verbindung und sind nach dem Trennen weg.
+    // Fuer den Cloud-Upload ist das Quittungs-Abo nicht optional: ohne es steht
+    // der Fortschritt des zweiten Auges still. Also hier erneut holen - der
+    // Bildschirm, der es beim Oeffnen geholt hat, bemerkt den Reconnect nicht.
+    if (!locked) await ensureUpload();
   }
 
   /// [forget]=true vergisst den Sitzungs-Code -> der naechste Connect verlangt wieder
@@ -702,6 +812,8 @@ class EyeBle extends ChangeNotifier {
     _chars.clear();
     try { await device?.disconnect(); } catch (_) {}
     _loaded = false;
+    _groups.clear();
+    channelDead = false;
     connectStep = '';
     connected = false;
     authorized = false;
@@ -734,24 +846,21 @@ class EyeBle extends ChangeNotifier {
     return v.length >= 2 ? [v[0], v[1]] : [v[0], v[0]];
   }
 
+  /// Die Werte des Hauptbildschirms - sechs Lesevorgaenge, nicht mehr.
+  ///
+  /// Funk-Status, Verbindungsqualitaet und Upload-Quittungen standen hier
+  /// ebenfalls. Sie sind in ensureDiag/ensureUpload gewandert: kein Bildschirm
+  /// ausser der Diagnose und dem Cloud-Upload zeigt sie an.
   Future<void> _readAll() async {
     final eid   = await _readPair(EyeUuids.chrEyeId);
     final br    = await _readPair(EyeUuids.chrBrightness);
     final anim  = await _readPair(EyeUuids.chrAnimEn);
     final cnt   = await _readByte(EyeUuids.chrEyeCount);
-    final link  = await _readByte(EyeUuids.chrSlaveLink);
 
     if (eid != null)  eyeId      = eid;
     if (br != null)   brightness = br;
     if (anim != null) animEnabled = anim;
     if (cnt != null)  eyeCount   = cnt;
-    if (link != null) slaveLinked = link == 1;
-    final diag = await _readBytes(EyeUuids.chrLinkDiag);
-    if (diag != null && diag.length >= 4) _parseLinkDiag(diag);
-    final rcp = await _readBytes(EyeUuids.chrSlaveReceipt);
-    if (rcp != null && rcp.length >= 6) {
-      _parseReceipt(rcp);
-    }
     final slotMask = await _readByte(EyeUuids.chrSlotStatus);
     if (slotMask != null) slotOccupiedMask = slotMask;
     final nm = await _readBytes(EyeUuids.chrDeviceName);
@@ -788,70 +897,6 @@ class EyeBle extends ChangeNotifier {
         () => c.setNotifyValue(true));
     if (ok == null) return null;
     return c.lastValueStream.listen(onData);
-  }
-
-  Future<void> _subscribeNotifies() async {
-    _subEyeId = await _subscribe(EyeUuids.chrEyeId, (v) {
-      // 2 Bytes [Master, Slave]; aeltere Firmware meldet nur eines fuer beide.
-      if (v.isEmpty) return;
-      eyeId = v.length >= 2 ? [v[0], v[1]] : [v[0], v[0]];
-      notifyListeners();
-    });
-    // Funk-Status live mitverfolgen (Master notifyt 1x/s).
-    _subSlaveLink = await _subscribe(EyeUuids.chrSlaveLink, (v) {
-      if (v.isNotEmpty) { slaveLinked = v[0] == 1; notifyListeners(); }
-    });
-    // ESP-NOW-Verbindungsqualitaet live (state / silence / loss).
-    _subLinkDiag = await _subscribe(EyeUuids.chrLinkDiag, (v) {
-      if (v.length >= 4) { _parseLinkDiag(v); notifyListeners(); }
-    });
-    _subSlaveReceipt = await _subscribe(EyeUuids.chrSlaveReceipt, (v) {
-      if (v.length >= 6) { _parseReceipt(v); notifyListeners(); }
-    });
-    // chrSlotStatus wird nur EINMAL via _readAll gelesen - kein Notify-Subscribe,
-    // weil das beim ESP zu BLE-Coex-Druck waehrend Forward gefuehrt hat.
-
-    // --- Kopplung: ein Fund pro Notify (8 Bytes), Zustand als 9-Byte-Block ---
-    _subPairFound = await _subscribe(EyeUuids.chrPairFound, (v) {
-      if (v.length < 8) return;
-      final mac = v.sublist(0, 6);
-      if (pairingFound.any((f) => _macEq(f.mac, mac))) return;
-      final rssi = v[6] > 127 ? v[6] - 256 : v[6];   // int8
-      pairingFound.add(FoundSlave(
-        mac, rssi, (v[7] & 0x01) != 0, (v[7] & 0x02) != 0));
-      notifyListeners();
-    });
-    _subPairState = await _subscribe(EyeUuids.chrPairState, (v) {
-      if (v.length < 9) return;
-      _parsePairState(v);
-      notifyListeners();
-    });
-    // Startwert des Kopplungs-Zustands, damit der Screen nicht bei Null beginnt.
-    // Ueber _readBytes, nicht direkt: nur so bekommt der Vorgang eine Frist und
-    // reiht sich ein. Ein Lesevorgang ohne Frist in der Reihe wuerde alle
-    // folgenden blockieren.
-    final init = await _readBytes(EyeUuids.chrPairState);
-    if (init != null && init.length >= 9) _parsePairState(init);
-
-    // --- Ausrichtung: einmal lesen, damit die Regler richtig starten ---
-    final v = await _readBytes(EyeUuids.chrEyeGeom);
-    if (v != null && v.length >= 4) {
-      eyeYOff = [_s8(v[0]), _s8(v[2])];
-      eyeVisH = [v[1], v[3]];
-      // Versatz und Groesse kamen spaeter dazu und haengen hinten dran. Eine
-      // aeltere Firmware antwortet mit vier Bytes - dann bleibt es bei den
-      // Vorgaben, statt dass die Regler auf Null springen.
-      if (v.length >= 8) {
-        eyeXOff = [_s8(v[4]), _s8(v[6])];
-        eyeZoom = [v[5], v[7]];
-      }
-    }
-
-    // --- Bewegung: nur lesen, KEIN Abo. NimBLE haelt pro Verbindung nur begrenzt
-    //     viele CCCD-Slots vor (Standard 8), und die waren bereits vergeben - ein
-    //     neuntes Abo scheitert mit GATT_WRITE_NOT_PERMITTED und riss die ganze
-    //     Verbindung mit. Den Stand holen wir nach jedem Schreibvorgang aktiv ab.
-    await _readAnimCfg();
   }
 
   /// Holt den tatsaechlichen Stand aus der Firmware. Wichtig nach Voreinstellung,
@@ -1018,6 +1063,11 @@ class EyeBle extends ChangeNotifier {
   /// Writes still, solange die Verbindung nicht autorisiert ist. Dafuer gibt es
   /// die Nachkontrolle in setEyeId.
   Future<bool> _writeGuarded(BluetoothCharacteristic c, List<int> data) async {
+    if (channelDead) {
+      lastError = 'Die Verbindung antwortet nicht mehr. Bitte trennen und neu '
+          'verbinden.';
+      return false;
+    }
     try {
       await _serialize(() => c
           .write(data, withoutResponse: false)
@@ -1025,8 +1075,7 @@ class EyeBle extends ChangeNotifier {
       lastError = null;
       return true;
     } on TimeoutException {
-      lastError = 'Das Auge hat nicht geantwortet (Zeit abgelaufen).';
-      _note('Schreiben ${_shortUuid(c.uuid)}: Zeit abgelaufen');
+      _channelIsDead('Schreiben ${_shortUuid(c.uuid)}: Zeit abgelaufen');
       return false;
     } catch (e) {
       lastError = 'Schreiben fehlgeschlagen: $e';

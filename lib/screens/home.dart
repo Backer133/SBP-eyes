@@ -145,6 +145,34 @@ class _HomeScreenState extends State<HomeScreen> {
     }
   }
 
+  /// Hinweis, wenn das Auge nicht mehr antwortet, mit dem einzigen Weg heraus.
+  ///
+  /// Neu verbinden hilft wirklich: ein abgebrochener Vorgang bleibt im Browser
+  /// anhaengig und belegt den Kanal, bis die Verbindung selbst neu aufgebaut wird.
+  Widget _deadBanner(EyeBle ble) => Material(
+        color: kBad.withOpacity(.18),
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(16, 10, 8, 10),
+          child: Row(
+            children: [
+              const Icon(Icons.link_off, color: kBad, size: 20),
+              const SizedBox(width: 10),
+              const Expanded(
+                child: Text('Das Auge antwortet nicht mehr. Neu verbinden.',
+                    style: TextStyle(fontSize: 13)),
+              ),
+              TextButton(
+                onPressed: () async {
+                  await ble.disconnect(forget: true);
+                  if (mounted) Navigator.of(context).pop();
+                },
+                child: const Text('Neu verbinden'),
+              ),
+            ],
+          ),
+        ),
+      );
+
   @override
   Widget build(BuildContext context) {
     final ble = widget.ble;
@@ -194,12 +222,29 @@ class _HomeScreenState extends State<HomeScreen> {
           const SizedBox(width: 4),
         ],
       ),
-      body: locked ? LockGate(ble: ble) : screens[_tab],
+      body: locked
+          ? LockGate(ble: ble)
+          : Column(
+              children: [
+                // Ist der Kanal tot, scheitert ALLES Weitere - und zwar jedes Mal
+                // mit derselben Frist. Das gehoert oben hin, nicht in eine
+                // Meldung, die nach sechs Sekunden verschwindet.
+                if (ble.channelDead) _deadBanner(ble),
+                Expanded(child: screens[_tab]),
+              ],
+            ),
       bottomNavigationBar: locked
           ? null
           : NavigationBar(
               selectedIndex: _tab,
-              onDestinationSelected: (i) => setState(() => _tab = i),
+              onDestinationSelected: (i) {
+                setState(() => _tab = i);
+                // Die Werte dieser Bildschirme werden erst beim Oeffnen geholt.
+                // Beim Verbinden fielen sie weg, damit das Anmelden nicht auf
+                // Daten wartet, die nur hier zu sehen sind (EyeBle.ensure*).
+                if (i == 1) ble.ensureUpload();
+                if (i == 3) ble.ensureDiag();
+              },
               destinations: const [
                 NavigationDestination(icon: Icon(Icons.grid_view), label: 'Augen'),
                 NavigationDestination(icon: Icon(Icons.cloud_download), label: 'Cloud'),

@@ -19,7 +19,12 @@ class _PairingScreenState extends State<PairingScreen> {
   @override
   void initState() {
     super.initState();
-    WidgetsBinding.instance.addPostFrameCallback((_) {
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      // Abos und Startwert der Kopplung holen, bevor gesucht wird: sie laufen
+      // nicht mehr beim Verbinden mit, damit das Anmelden nicht auf Werte
+      // wartet, die nur dieser Bildschirm anzeigt.
+      await widget.ble.ensurePairing();
+      if (!mounted) return;
       widget.ble.startPairingScan();
     });
   }

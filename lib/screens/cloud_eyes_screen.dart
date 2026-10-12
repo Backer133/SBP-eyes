@@ -30,6 +30,10 @@ class _CloudEyesScreenState extends State<CloudEyesScreen> {
   @override
   void initState() {
     super.initState();
+    // Quittungs-Abo des zweiten Auges holen. Es laeuft nicht mehr beim Verbinden
+    // mit (siehe EyeBle.ensureUpload); ohne es steht der Upload-Fortschritt des
+    // Slaves still.
+    widget.ble.ensureUpload();
     _refresh();
   }
 
