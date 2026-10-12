@@ -10,4 +10,4 @@
 /// wurde dadurch zeitweise ein Stand von vorgestern, ohne dass es jemand sehen
 /// konnte. Der Service Worker ist abgeschaltet - und hier steht, woran man es
 /// erkennt.
-const String kAppVersion = '3.11.0+43';
+const String kAppVersion = '3.12.0+44';

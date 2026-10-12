@@ -237,6 +237,16 @@ class EyeBle extends ChangeNotifier {
   static bool flickerAllowed(int eyeId) =>
       eyeId >= 0 && eyeId < 8 && (kFlickerAllowed & (1 << eyeId)) != 0;
 
+  /// Zusaetzlich zum Slot entscheidet der NAME: nur Augen mit "Tot" darin
+  /// brennen. Die Vorlagen heissen Tot_Augen_1, Tot_Augen_2 und so fort.
+  ///
+  /// Am Namen und nicht an einer Liste von Slots, weil der Slot wechselt: wer
+  /// ein anderes Auge in denselben Slot laedt, soll den Schalter dort nicht
+  /// vorfinden. Die Pruefung ist bewusst grosszuegig (Teilzeichenkette, Gross-
+  /// und Kleinschreibung egal) - sie soll niemanden aussperren, der sein Auge
+  /// "tot_feuer" nennt.
+  static bool flickerNameOk(String name) => name.toLowerCase().contains('tot');
+
   /// Grund, warum der letzte Befehl nicht ankam - null, wenn alles lief.
   ///
   /// Bisher verschwanden diese Fehler restlos: `onTap: () => ble.setEyeId(...)`
@@ -1082,6 +1092,18 @@ class EyeBle extends ChangeNotifier {
   /// Geschickt wird die vollstaendige Maske, nicht ein einzelnes Bit: so bleibt
   /// die Firmware ohne Zustand - die App kennt alle acht Augen und sagt, was
   /// danach gelten soll.
+  /// Setzt die ganze Maske auf einmal. Fuer das Aufraeumen gedacht, wenn ein
+  /// Slot ein Auge bekommen hat, das nicht mehr brennen soll.
+  Future<bool> setFlickerMask(int maske) async {
+    final neu = maske & kFlickerAllowed;
+    if (neu == flickerMask) return true;
+    if (!await _animCmd(5, neu)) return false;
+    flickerMask = neu;
+    notifyListeners();
+    await _readAnimCfg();
+    return true;
+  }
+
   Future<bool> setFlicker(int eyeId, bool an) async {
     if (eyeId < 0 || eyeId >= 8) return false;
     if (!flickerAllowed(eyeId)) return false;

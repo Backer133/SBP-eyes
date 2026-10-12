@@ -31,7 +31,7 @@ class _HomeScreenState extends State<HomeScreen> {
   void initState() {
     super.initState();
     widget.ble.addListener(_onBleUpdate);
-    _loadSlotMeta();
+    _loadSlotMetaAndClean();
   }
 
   @override
@@ -44,6 +44,32 @@ class _HomeScreenState extends State<HomeScreen> {
     // Wenn sich pair_id geaendert hat (Reconnect anderer Geraet) -> neu laden
     _loadSlotMeta();
     if (mounted) setState(() {});
+  }
+
+  /// Nimmt das Brennen zurueck, wo der Name es nicht mehr hergibt.
+  ///
+  /// Sonst entsteht eine Sackgasse: wer ein anderes Auge in einen Slot laedt,
+  /// dessen Bit gesetzt war, haette ein flackerndes Auge ohne Schalter, um es
+  /// abzustellen. Die Pruefung gehoert hierher und nicht in den Dienst - nur der
+  /// Bildschirm kennt die Slot-Namen.
+  Future<void> _flickerAufraeumen() async {
+    final ble = widget.ble;
+    int sauber = ble.flickerMask;
+    for (int slot = 0; slot < kCloudSlotCount; slot++) {
+      final id = kHardcodedEyeCount + slot;
+      if (!ble.flickerBurns(id)) continue;
+      final name = slot < _slotMeta.length ? _slotMeta[slot]?.name : null;
+      // Kein Name bekannt -> nichts anruehren. Lieber ein Bit zu viel stehen
+      // lassen als eine Einstellung wegwerfen, weil die Metadaten fehlen.
+      if (name == null) continue;
+      if (!EyeBle.flickerNameOk(name)) sauber &= ~(1 << id);
+    }
+    if (sauber != ble.flickerMask) await ble.setFlickerMask(sauber);
+  }
+
+  Future<void> _loadSlotMetaAndClean() async {
+    await _loadSlotMeta();
+    await _flickerAufraeumen();
   }
 
   Future<void> _loadSlotMeta() async {
@@ -365,9 +391,10 @@ class _EyeGrid extends StatelessWidget {
   /// Motive, gilt sie entsprechend getrennt - deshalb steht der Name im Text und
   /// nicht nur "dieses Auge".
   Widget _flickerRow(BuildContext context, int id) {
-    // Nur fuer Cloud-Augen. Siehe EyeBle.kFlickerAllowed - die vier eingebauten
-    // Motive sind gewoehnliche Augen, dort waere der Schalter nur im Weg.
+    // Nur fuer Cloud-Augen, und dort nur fuer die Feuer-Motive: der Schalter
+    // erscheint, wenn "Tot" im Namen steht. Siehe EyeBle.flickerNameOk.
     if (!EyeBle.flickerAllowed(id)) return const SizedBox.shrink();
+    if (!EyeBle.flickerNameOk(_eyeName(id))) return const SizedBox.shrink();
     final an = ble.flickerBurns(id);
     return Material(
       color: Colors.white.withOpacity(.03),
