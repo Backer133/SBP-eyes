@@ -42,6 +42,16 @@ const int kEyeJpegMax = 80000;
 /// zeigte sich als feiner Saum am Pupillenrand.
 const int kEyeJpegQuality = 92;
 
+/// Unterste Qualitaet, auf die heruntergegangen wird, bevor abgebrochen wird.
+/// Darunter wird die Struktur sichtbar matschig - und ein Bild, das selbst bei
+/// 64 nicht passt, ist fuer diesen Zweck schlicht zu detailreich.
+const int kEyeJpegQualityMin = 64;
+
+/// Mit welcher Qualitaet das zuletzt erzeugte Auge kodiert wurde. Nur fuer die
+/// Anzeige: wenn ein Bild heruntergerechnet werden musste, soll man das sehen und
+/// nicht raetseln, warum es weicher aussieht als am Bildschirm.
+int lastJpegQuality = kEyeJpegQuality;
+
 /// Decodiert PNG/JPG, skaliert das Auge auf 280x280, legt es mittig auf eine
 /// 360x360-Leinwand mit fortgesetztem Rand und gibt ein JPEG zurueck.
 Uint8List pngToEyeJpeg(Uint8List pngBytes) {
@@ -81,14 +91,35 @@ Uint8List pngToEyeJpeg(Uint8List pngBytes) {
     }
   }
 
-  final jpg = Uint8List.fromList(
-      img.encodeJpg(canvas, quality: kEyeJpegQuality, chroma: img.JpegChroma.yuv444));
-
-  if (jpg.length > kEyeJpegMax) {
-    throw Exception('JPEG zu gross: ${jpg.length} Bytes, erlaubt sind $kEyeJpegMax. '
-                    'Bild mit weniger Details verwenden.');
+  // Qualitaet so weit senken, bis es in den Slot passt.
+  //
+  // Anlass war ein Lava-Auge: feine, kontrastreiche Struktur ueber die ganze
+  // Flaeche komprimiert JPEG schlecht, und bei Qualitaet 92 kamen 120 KB heraus -
+  // 40 KB ueber der Grenze. Gemessen passte dasselbe Bild ab Qualitaet 84 mit
+  // 73 KB; die glatten Augen liegen bei 92 ohnehin unter 50 KB und werden von
+  // dieser Schleife gar nicht erst angefasst.
+  //
+  // Lieber hier ein paar Prozent Qualitaet als die Grenze anheben: an
+  // CLOUD_JPEG_MAX haengt in der Firmware auch die Groesse der Fehlend-Bitmaske
+  // in der Empfangsquittung, und vier Slots teilen sich 917.504 Byte LittleFS.
+  //
+  // 4:4:4 bleibt in jedem Fall. Das Chroma-Subsampling war der sichtbare Fehler
+  // (Saum am Pupillenrand, Abweichung 6 statt 2-3 Stufen), nicht die Qualitaet.
+  Uint8List? jpg;
+  for (int q = kEyeJpegQuality; q >= kEyeJpegQualityMin; q -= 4) {
+    jpg = Uint8List.fromList(
+        img.encodeJpg(canvas, quality: q, chroma: img.JpegChroma.yuv444));
+    if (jpg.length <= kEyeJpegMax) {
+      lastJpegQuality = q;
+      return jpg;
+    }
   }
-  return jpg;
+
+  // Auch bei der untersten Qualitaet zu gross: dann liegt es am Bild, nicht an
+  // der Einstellung, und die Meldung soll das auch sagen.
+  throw Exception('JPEG zu gross: ${jpg!.length} Bytes bei Qualitaet '
+                  '$kEyeJpegQualityMin, erlaubt sind $kEyeJpegMax. '
+                  'Bild mit weniger feiner Struktur verwenden.');
 }
 
 /// Prueft die Rahmen-Marker. Ein abgeschnittenes JPEG faengt richtig an, endet aber

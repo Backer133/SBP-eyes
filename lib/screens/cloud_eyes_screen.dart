@@ -64,6 +64,17 @@ class _CloudEyesScreenState extends State<CloudEyesScreen> {
     try {
       final pngBytes = await _api.download(eye);
       final jpeg = pngToEyeJpeg(pngBytes);
+      // Musste das Bild staerker komprimiert werden, soll man das erfahren -
+      // sonst sucht man den Grund spaeter am Auge, wenn es weicher aussieht als
+      // die Vorlage am Bildschirm.
+      if (lastJpegQuality < kEyeJpegQuality && mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          duration: const Duration(seconds: 5),
+          content: Text('Sehr detailreiches Bild - mit Qualitaet '
+                        '$lastJpegQuality statt $kEyeJpegQuality uebertragen, '
+                        'damit es in den Slot passt.'),
+        ));
+      }
       await widget.ble.uploadEye(slot, jpeg, onProgress: (sent, total) {
         if (!mounted) return;
         setState(() { _downloadDone = sent; _downloadTotal = total; });
