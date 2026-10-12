@@ -27,6 +27,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
   @override
   void initState() {
     super.initState();
+    // Der Kopplungs-Zustand wird nicht mehr beim Verbinden mitgelesen (siehe
+    // EyeBle.loadAll). Ohne diesen Aufruf stuende hier "Nicht gekoppelt",
+    // obwohl das Paar gebunden ist.
+    widget.ble.ensurePairState();
     _loadVersion();
   }
 

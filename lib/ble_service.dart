@@ -540,10 +540,31 @@ class EyeBle extends ChangeNotifier {
   /// denselben Vorgang statt einen zweiten anzustossen.
   final Map<String, Future<void>> _groups = {};
   Future<void> _once(String name, Future<void> Function() body) {
-    final f = _groups.putIfAbsent(name, body);
+    final laufend = _groups[name];
+    if (laufend != null) return laufend;
+    // BEWUSST nicht putIfAbsent: eine Gruppe darf eine andere anfordern (die
+    // Diagnose braucht den Kopplungs-Zustand). putIfAbsent verbietet, die Map
+    // in seinem eigenen Rueckruf zu veraendern - das haette einen
+    // ConcurrentModificationError gegeben, und zwar erst zur Laufzeit.
+    final f = body();
+    _groups[name] = f;
     _startPolling();
     return f;
   }
+
+  /// Kopplungs-Zustand einmal holen: wer ist gebunden, an welche MAC.
+  ///
+  /// Eigene Gruppe, weil ZWEI Bildschirme ihn brauchen - die Kopplung selbst
+  /// und die Diagnose. Letztere zeigte sonst "Nicht gekoppelt" an, obwohl das
+  /// Paar laengst gebunden war: `isBound` haengt an `boundMac`, und das stand
+  /// mangels Abfrage auf lauter Nullen.
+  Future<void> ensurePairState() => _once('pairstate', () async {
+    final v = await _readBytes(EyeUuids.chrPairState);
+    if (v != null && v.length >= 9) {
+      _parsePairState(v);
+      notifyListeners();
+    }
+  });
 
   // ===== Nachfragen statt lauschen (nur im Browser) =====
 
@@ -601,6 +622,9 @@ class EyeBle extends ChangeNotifier {
 
   /// Funk-Status und Verbindungsqualitaet. Nur die Diagnose zeigt das.
   Future<void> ensureDiag() => _once('diag', () async {
+    // Ohne den Kopplungs-Zustand stimmt die halbe Diagnose nicht: "Verbunden"
+    // gegen "Nicht gekoppelt" entscheidet sich an isBound, nicht am Funk.
+    await ensurePairState();
     final link = await _readByte(EyeUuids.chrSlaveLink);
     if (link != null) slaveLinked = link == 1;
     final diag = await _readBytes(EyeUuids.chrLinkDiag);
@@ -638,8 +662,7 @@ class EyeBle extends ChangeNotifier {
       notifyListeners();
     });
     // Startwert, damit der Bildschirm nicht bei Null beginnt.
-    final init = await _readBytes(EyeUuids.chrPairState);
-    if (init != null && init.length >= 9) _parsePairState(init);
+    await ensurePairState();
     notifyListeners();
   });
 
