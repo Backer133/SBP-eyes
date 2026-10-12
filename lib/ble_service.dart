@@ -228,6 +228,15 @@ class EyeBle extends ChangeNotifier {
   bool flickerBurns(int eyeId) =>
       eyeId >= 0 && eyeId < 8 && (flickerMask & (1 << eyeId)) != 0;
 
+  /// Welche Augen ueberhaupt brennen duerfen: nur die Cloud-Slots.
+  ///
+  /// Die vier eingebauten Augen sind feste, gewoehnliche Motive - ein Schalter
+  /// "brennt" an jedem davon waere Platz fuer eine Einstellung, die dort nie
+  /// jemand braucht. Gebrannt wird mit einem Motiv, das man dafuer hochlaedt.
+  static const int kFlickerAllowed = 0xF0;   // Bit 4..7 = Cloud-Slot 1..4
+  static bool flickerAllowed(int eyeId) =>
+      eyeId >= 0 && eyeId < 8 && (kFlickerAllowed & (1 << eyeId)) != 0;
+
   /// Grund, warum der letzte Befehl nicht ankam - null, wenn alles lief.
   ///
   /// Bisher verschwanden diese Fehler restlos: `onTap: () => ble.setEyeId(...)`
@@ -992,6 +1001,20 @@ class EyeBle extends ChangeNotifier {
     // ein Schalter, der erst nach einem Umweg ueber einen anderen Bildschirm
     // stimmt, waere die schlechtere Wahl.
     await _readAnimCfg();
+
+    // Altlast aufraeumen: fuer die eingebauten Augen gibt es den Schalter nicht
+    // mehr. Ein dort noch gesetztes Bit wuerde ein Auge flackern lassen, das
+    // sich nicht mehr abschalten laesst - eine Sackgasse, die der Nutzer selbst
+    // nicht aufloesen koennte.
+    final uebrig = flickerMask & ~kFlickerAllowed;
+    if (uebrig != 0) {
+      EyeLog.add('Flackern bei eingebautem Auge zurueckgenommen '
+          '(0x${uebrig.toRadixString(16)})');
+      if (await _animCmd(5, flickerMask & kFlickerAllowed)) {
+        flickerMask &= kFlickerAllowed;
+        notifyListeners();
+      }
+    }
   }
 
   void _parseReceipt(List<int> v) {
@@ -1061,7 +1084,9 @@ class EyeBle extends ChangeNotifier {
   /// danach gelten soll.
   Future<bool> setFlicker(int eyeId, bool an) async {
     if (eyeId < 0 || eyeId >= 8) return false;
-    final neu = an ? (flickerMask | (1 << eyeId)) : (flickerMask & ~(1 << eyeId));
+    if (!flickerAllowed(eyeId)) return false;
+    final neu = (an ? (flickerMask | (1 << eyeId)) : (flickerMask & ~(1 << eyeId)))
+        & kFlickerAllowed;
     if (!await _animCmd(5, neu)) return false;
     flickerMask = neu;
     notifyListeners();

@@ -365,6 +365,9 @@ class _EyeGrid extends StatelessWidget {
   /// Motive, gilt sie entsprechend getrennt - deshalb steht der Name im Text und
   /// nicht nur "dieses Auge".
   Widget _flickerRow(BuildContext context, int id) {
+    // Nur fuer Cloud-Augen. Siehe EyeBle.kFlickerAllowed - die vier eingebauten
+    // Motive sind gewoehnliche Augen, dort waere der Schalter nur im Weg.
+    if (!EyeBle.flickerAllowed(id)) return const SizedBox.shrink();
     final an = ble.flickerBurns(id);
     return Material(
       color: Colors.white.withOpacity(.03),
