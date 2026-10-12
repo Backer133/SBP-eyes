@@ -1,7 +1,7 @@
 name: eye_pair_app
 description: BLE-Steuerung fuer ESP32-S3-LCD-1.28 Augen-Paar (240x240, Kabel-Sync)
 publish_to: 'none'
-version: 3.9.1+40
+version: 3.10.0+41
 
 environment:
   sdk: ^3.5.0

@@ -219,6 +219,15 @@ class EyeBle extends ChangeNotifier {
   bool authNoAnswer = false;
   /// true, sobald die Werte und Abos nach der Autorisierung geholt wurden.
   bool _loaded = false;
+  /// Welche Augen brennen: Bit n = Auge n flackert ("brennendes Auge").
+  ///
+  /// Voreinstellung 0 - nichts flackert, bis der Nutzer es einschaltet. Die
+  /// Einstellung haengt am AUGE, nicht am Geraet: beide Augen pruefen dieselbe
+  /// Maske gegen das Motiv, das sie gerade zeigen.
+  int flickerMask = 0;
+  bool flickerBurns(int eyeId) =>
+      eyeId >= 0 && eyeId < 8 && (flickerMask & (1 << eyeId)) != 0;
+
   /// Grund, warum der letzte Befehl nicht ankam - null, wenn alles lief.
   ///
   /// Bisher verschwanden diese Fehler restlos: `onTap: () => ble.setEyeId(...)`
@@ -978,6 +987,11 @@ class EyeBle extends ChangeNotifier {
     if (slotMask != null) slotOccupiedMask = slotMask;
     final nm = await _readBytes(EyeUuids.chrDeviceName);
     if (nm != null && nm.isNotEmpty) deviceName = String.fromCharCodes(nm);
+    // Der Schalter "brennt" steht im Augen-Raster, also auf dem ersten
+    // Bildschirm - sein Stand muss hier mit geholt werden. Ein Lesevorgang mehr;
+    // ein Schalter, der erst nach einem Umweg ueber einen anderen Bildschirm
+    // stimmt, waere die schlechtere Wahl.
+    await _readAnimCfg();
   }
 
   void _parseReceipt(List<int> v) {
@@ -1032,8 +1046,30 @@ class EyeBle extends ChangeNotifier {
     final v = await _readBytes(EyeUuids.chrAnimCfg);
     if (v != null && v.length >= AnimCfg.byteLength) {
       animCfg = AnimCfg.fromBytes(v);
+      // Die Flacker-Maske haengt HINTEN an. Eine aeltere Firmware liefert nur
+      // die Bewegungs-Bytes - dann bleibt die Maske bei 0, also "nichts
+      // brennt", und das ist auch die richtige Anzeige.
+      if (v.length >= AnimCfg.byteLength + 1) flickerMask = v[AnimCfg.byteLength];
       notifyListeners();
     }
+  }
+
+  /// Schaltet das Flackern fuer EIN Auge ein oder aus.
+  ///
+  /// Geschickt wird die vollstaendige Maske, nicht ein einzelnes Bit: so bleibt
+  /// die Firmware ohne Zustand - die App kennt alle acht Augen und sagt, was
+  /// danach gelten soll.
+  Future<bool> setFlicker(int eyeId, bool an) async {
+    if (eyeId < 0 || eyeId >= 8) return false;
+    final neu = an ? (flickerMask | (1 << eyeId)) : (flickerMask & ~(1 << eyeId));
+    if (!await _animCmd(5, neu)) return false;
+    flickerMask = neu;
+    notifyListeners();
+    // Den Stand zurueckholen: es gilt, was das Auge meldet, nicht was die App
+    // geschickt hat. Eine Firmware ohne Kommando 5 ignoriert den Schreibvorgang
+    // stillschweigend - dann springt der Schalter zurueck und sagt die Wahrheit.
+    await _readAnimCfg();
+    return true;
   }
 
   /// Byte als vorzeichenbehaftet lesen - y_off kann negativ sein.

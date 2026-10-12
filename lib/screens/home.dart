@@ -353,7 +353,39 @@ class _EyeGrid extends StatelessWidget {
             ),
           ),
         Expanded(child: _grid(context)),
+        _flickerRow(context, idMaster),
       ],
+    );
+  }
+
+  /// Schalter "brennt" fuer das Motiv, das Auge 1 gerade zeigt.
+  ///
+  /// Die Einstellung haengt am MOTIV, nicht am Geraet: beide Augen pruefen
+  /// dieselbe Maske gegen das, was sie gerade zeigen. Zeigen sie verschiedene
+  /// Motive, gilt sie entsprechend getrennt - deshalb steht der Name im Text und
+  /// nicht nur "dieses Auge".
+  Widget _flickerRow(BuildContext context, int id) {
+    final an = ble.flickerBurns(id);
+    return Material(
+      color: Colors.white.withOpacity(.03),
+      child: SwitchListTile(
+        value: an,
+        dense: true,
+        secondary: Icon(Icons.local_fire_department,
+            color: an ? kWarn : Colors.white.withOpacity(.30)),
+        title: Text('"${_eyeName(id)}" brennt',
+            style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600)),
+        subtitle: Text('Helligkeit flackert wie ein Feuer',
+            style: TextStyle(fontSize: 11, color: Colors.white.withOpacity(.5))),
+        onChanged: (v) async {
+          final ok = await ble.setFlicker(id, v);
+          if (ok || !context.mounted) return;
+          ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+            backgroundColor: kBad,
+            content: Text(ble.lastError ?? 'Konnte nicht gesetzt werden.'),
+          ));
+        },
+      ),
     );
   }
 
