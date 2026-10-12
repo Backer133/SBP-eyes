@@ -4,6 +4,7 @@ import 'dart:typed_data';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 
+import 'eye_log.dart';
 import 'image_pipeline.dart' show kEyeJpegMax, isCompleteJpeg;
 
 // UUIDs MUESSEN identisch zu denen im Master.ino sein!
@@ -348,15 +349,24 @@ class EyeBle extends ChangeNotifier {
   /// Live-Diagnose ist brauchbar - eine haengende ist es nicht.
   Future<T?> _gatt<T>(String what, Future<T> Function() op,
       {Duration? limit}) async {
-    if (channelDead) return null;
+    if (channelDead) {
+      EyeLog.add('$what  uebersprungen (Kanal tot)');
+      return null;
+    }
     connectStep = what;
     notifyListeners();
+    final t0 = DateTime.now();
+    int ms() => DateTime.now().difference(t0).inMilliseconds;
     try {
-      return await _serialize(() => op().timeout(limit ?? _kGattStep));
+      final r = await _serialize(() => op().timeout(limit ?? _kGattStep));
+      EyeLog.gatt(what, ms());
+      return r;
     } on TimeoutException {
+      EyeLog.gatt(what, ms(), fehler: 'Zeit abgelaufen');
       _channelIsDead('$what: Zeit abgelaufen');
       return null;
     } catch (e) {
+      EyeLog.gatt(what, ms(), fehler: '$e');
       _note('$what: $e');
       return null;
     }
@@ -402,7 +412,9 @@ class EyeBle extends ChangeNotifier {
     _groups.clear();
     connectStep = 'Verbinden...';
     notifyListeners();
+    EyeLog.add('--- Verbinden mit ${d.remoteId.str} ---');
     await d.connect(timeout: const Duration(seconds: 10), autoConnect: false);
+    EyeLog.add('verbunden');
 
     // Groessere BLE-Pakete aushandeln, bevor irgendetwas uebertragen wird.
     //
@@ -459,6 +471,10 @@ class EyeBle extends ChangeNotifier {
         _chars[c.uuid] = c;
       }
     }
+    // Welche Dienste der Browser freigegeben hat, ist im Web die halbe Miete:
+    // nicht angemeldete Dienste fehlen dort einfach, ohne jede Fehlermeldung.
+    EyeLog.add('Dienste: ${services.length}, '
+        'Characteristics: ${_chars.length}');
 
     // ZUERST der Zugang, danach alles andere.
     //
@@ -735,6 +751,8 @@ class EyeBle extends ChangeNotifier {
       return false;
     }
     final heard = await _awaitAuthLevelChange(before);
+    EyeLog.add('Zugangscode gesendet: Level $authLevel, '
+        'Antwort ${heard ? "gesehen" : "AUSGEBLIEBEN"}');
     if (authorized) {
       _sessionKey = key;   // korrekter Code -> nur fuer diese Sitzung merken (RAM)
       // isAdmin wurde bereits aus CHR_AUTH_STATUS gesetzt (_parseAuthLevel) -
@@ -1062,22 +1080,29 @@ class EyeBle extends ChangeNotifier {
   /// die Nachkontrolle in setEyeId.
   Future<bool> _writeGuarded(BluetoothCharacteristic c, List<int> data) async {
     if (channelDead) {
+      EyeLog.add('Schreiben ${_shortUuid(c.uuid)}  uebersprungen (Kanal tot)');
       lastError = 'Die Verbindung antwortet nicht mehr. Bitte trennen und neu '
           'verbinden.';
       return false;
     }
+    final t0 = DateTime.now();
+    int ms() => DateTime.now().difference(t0).inMilliseconds;
     try {
       // Dieselbe Frist wie beim Lesen: seit eine gerissene Frist den Kanal fuer
       // tot erklaert, waere eine knappere hier gefaehrlich, nicht vorsichtig.
       await _serialize(() => c
           .write(data, withoutResponse: false)
           .timeout(_kGattStep));
+      EyeLog.gatt('Schreiben ${_shortUuid(c.uuid)} (${data.length} B)', ms());
       lastError = null;
       return true;
     } on TimeoutException {
+      EyeLog.gatt('Schreiben ${_shortUuid(c.uuid)}', ms(),
+          fehler: 'Zeit abgelaufen');
       _channelIsDead('Schreiben ${_shortUuid(c.uuid)}: Zeit abgelaufen');
       return false;
     } catch (e) {
+      EyeLog.gatt('Schreiben ${_shortUuid(c.uuid)}', ms(), fehler: '$e');
       lastError = 'Schreiben fehlgeschlagen: $e';
       _note('Schreiben ${_shortUuid(c.uuid)}: $e');
       return false;

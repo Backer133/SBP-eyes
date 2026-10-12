@@ -38,14 +38,26 @@ class _LockGateState extends State<LockGate> {
     setState(() {
       _busy = false;
       if (!ok) {
-        // Ausgebliebene Antwort NICHT als falschen Code melden: der Code kann
-        // richtig gewesen sein, und ein Fehlversuch wurde dann auch keiner
-        // gezaehlt. Der Hinweis muss sagen, was wirklich zu tun ist.
+        // Drei Faelle, die alle wie "falscher Code" aussehen koennen:
+        //
+        //   1. Der Code war wirklich falsch.
+        //   2. Das Auge sperrt gerade. Die Firmware steigt dann STUMM aus
+        //      (Master.ino, AuthCb::onWrite: return VOR auth_status_notify) -
+        //      von aussen nicht von Fall 1 zu unterscheiden, also muss der Text
+        //      beides nennen, sonst sucht man am falschen Ende.
+        //   3. Der Code kam gar nicht erst an. Dann ist es kein Fehlversuch,
+        //      die Firmware hat auch keinen gezaehlt, und der eigentliche Grund
+        //      steht in lastError - der gehoert dazu.
+        final grund = widget.ble.lastError;
         _error = widget.ble.authNoAnswer
             ? 'Keine Antwort vom Auge. Nochmal senden - im Browser hilft '
               'notfalls: Seite neu laden und erneut verbinden.'
-            : 'Falscher Code. Nach 5 Fehlversuchen 30 s gesperrt.';
-        if (!widget.ble.authNoAnswer) _ctrl.clear();
+              '${grund == null ? "" : "\n\n$grund"}'
+            : 'Falscher Code - oder das Auge sperrt gerade.\n\n'
+              'Nach 5 Fehlversuchen blockiert das Auge 30 Sekunden lang JEDEN '
+              'Code, auch den richtigen, und meldet dabei nichts. Wenn der Code '
+              'stimmt: 30 Sekunden warten, nichts antippen, dann einmal senden.';
+        // Den Code stehen lassen: er kann richtig gewesen sein.
       }
     });
     // Bei Erfolg schaltet ble.authorized -> HomeScreen blendet das Gate aus.

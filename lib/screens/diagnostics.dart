@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import '../ble_service.dart';
 import '../theme.dart';
+import 'log_screen.dart';
 
 class DiagnosticsScreen extends StatelessWidget {
   final EyeBle ble;
@@ -16,6 +17,17 @@ class DiagnosticsScreen extends StatelessWidget {
         return ListView(
           padding: const EdgeInsets.fromLTRB(16, 8, 16, 32),
           children: [
+            // Das Protokoll auch von hier aus erreichbar: wer in der Diagnose
+            // steht, sucht ohnehin nach einer Ursache.
+            Align(
+              alignment: Alignment.centerRight,
+              child: TextButton.icon(
+                icon: const Icon(Icons.article_outlined, size: 18),
+                label: const Text('Protokoll'),
+                onPressed: () => Navigator.of(context).push(
+                    MaterialPageRoute(builder: (_) => const LogScreen())),
+              ),
+            ),
             const SectionHeader('Funk-Verbindung (ESP-NOW)', icon: Icons.wifi),
             _bigCard(
               // Symbol und Farbe muessen aus derselben Quelle kommen wie der Text.

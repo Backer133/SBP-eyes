@@ -8,6 +8,7 @@ import 'package:permission_handler/permission_handler.dart';
 import '../ble_service.dart';
 import '../theme.dart';
 import 'home.dart';
+import 'log_screen.dart';
 
 class DiscoveryScreen extends StatefulWidget {
   final EyeBle ble;
@@ -253,6 +254,16 @@ class _DiscoveryScreenState extends State<DiscoveryScreen>
                 style: TextStyle(fontSize: 13, color: Colors.white.withOpacity(.55)),
               ),
             ],
+          ),
+          const Spacer(),
+          // Bewusst HIER und nicht erst hinter der Verbindung: im Browser gibt
+          // es keine Entwicklerkonsole, und der Fall, der am meisten Aufklaerung
+          // braucht, ist der, in dem das Verbinden gar nicht erst klappt.
+          IconButton(
+            icon: const Icon(Icons.article_outlined),
+            tooltip: 'Protokoll',
+            onPressed: () => Navigator.of(context).push(
+                MaterialPageRoute(builder: (_) => const LogScreen())),
           ),
         ],
       ),
