@@ -209,6 +209,15 @@ class EyeBle extends ChangeNotifier {
   /// und weiss nicht, ob gerade Dienste gesucht, Werte gelesen oder Abos
   /// eingerichtet werden.
   String connectStep = '';
+  /// true = der Zugangscode ging raus, aber das Auge hat nicht geantwortet.
+  ///
+  /// Das ist NICHT dasselbe wie ein falscher Code, und der Unterschied ist
+  /// wichtig: bei einem falschen Code zaehlt die Firmware einen Fehlversuch und
+  /// sperrt nach fuenf. Bliebe eine ausgebliebene Antwort davon ununterscheidbar,
+  /// koennte eine wackelige Verbindung den Nutzer aussperren.
+  bool authNoAnswer = false;
+  /// true, sobald die Werte und Abos nach der Autorisierung geholt wurden.
+  bool _loaded = false;
   bool authSupported = false;  // false = alte Firmware ohne Auth-Charakteristik
   // Zaehlt hoch bei jedem fehlgeschlagenen Code-Versuch (fuer UI-Feedback).
   int authAttempts = 0;
@@ -344,6 +353,7 @@ class EyeBle extends ChangeNotifier {
     // Lesefehler aus _readAll wieder verschwinden, bevor sie jemand sieht.
     subscribeErrors.clear();
     _gattStalled = false;
+    _loaded = false;
     connectStep = 'Verbinden...';
     notifyListeners();
     await d.connect(timeout: const Duration(seconds: 10), autoConnect: false);
@@ -358,20 +368,24 @@ class EyeBle extends ChangeNotifier {
     // Die Haeppchengroesse wird bewusst aus dem TATSAECHLICH gewaehrten Wert berechnet
     // und nicht fest gesetzt: ein Auge mit aelterer Firmware gewaehrt weiterhin nur 255,
     // und die App muss sich danach richten, statt mit zu grossen Paketen aufzulaufen.
-    try {
-      connectStep = 'Paketgroesse aushandeln...';
-      notifyListeners();
-      // Frist auch hier: im Browser gibt es requestMtu nicht, und ob die
-      // Bibliothek das mit einem Fehler quittiert oder schlicht nie antwortet,
-      // ist nicht garantiert.
-      final mtu = await d.requestMtu(512).timeout(_kGattStep);
-      // 3 Byte ATT-Kopf, 6 Byte eigener Kopf. Untergrenze ist der bisherige Wert,
-      // damit sich am Verhalten gegenueber alter Firmware nichts aendert.
-      _chunkSize = (mtu - 9).clamp(_kChunkSizeMin, _kChunkSizeMax);
-    } catch (_) {
-      // Schlaegt die Aushandlung fehl, bleibt es beim bisherigen Wert - der hat
-      // immer funktioniert.
+    // Im Browser gibt es requestMtu gar nicht (Web Bluetooth kennt keine
+    // MTU-Aushandlung). Der Aufruf wird dort deshalb uebersprungen statt auf
+    // seine Frist zu warten - sechs gesparte Sekunden vor der Code-Eingabe.
+    if (kIsWeb) {
       _chunkSize = _kChunkSizeMin;
+    } else {
+      try {
+        connectStep = 'Paketgroesse aushandeln...';
+        notifyListeners();
+        final mtu = await d.requestMtu(512).timeout(_kGattStep);
+        // 3 Byte ATT-Kopf, 6 Byte eigener Kopf. Untergrenze ist der bisherige
+        // Wert, damit sich am Verhalten gegenueber alter Firmware nichts aendert.
+        _chunkSize = (mtu - 9).clamp(_kChunkSizeMin, _kChunkSizeMax);
+      } catch (_) {
+        // Schlaegt die Aushandlung fehl, bleibt es beim bisherigen Wert - der
+        // hat immer funktioniert.
+        _chunkSize = _kChunkSizeMin;
+      }
     }
 
     _subConn = d.connectionState.listen((s) {
@@ -400,18 +414,47 @@ class EyeBle extends ChangeNotifier {
       }
     }
 
+    // ZUERST der Zugang, danach alles andere.
+    //
+    // Hinter dem Sperr-Bildschirm ist kein einziger der Werte zu sehen - sie
+    // vorher zu holen heisst, den Nutzer auf Daten warten zu lassen, die er noch
+    // nicht sehen darf. Ueber Web Bluetooth wird daraus eine halbe Ewigkeit:
+    // dort laeuft jeder Lese- und Abo-Vorgang einzeln hintereinander durch
+    // denselben Kanal. Zehn Lesevorgaenge und sechs Abos VOR der Code-Eingabe
+    // waren der Grund, dass die Seite auf dem iPhone "ewig" lud.
+    //
+    // Jetzt sind es bis zur Code-Eingabe drei Schritte: Dienste, Abo und Lesen
+    // des Zugangs-Status.
+    connectStep = 'Zugang pruefen...';
+    notifyListeners();
+    await _authenticate();   // sendet nur einen bereits bestaetigten Sitzungs-Code
+
+    connectStep = '';
+    connected = true;
+    notifyListeners();
+
+    // Kein Sperr-Bildschirm, der das Nachholen ausloesen wuerde: alte Firmware
+    // ohne Zugangsschutz, oder der Sitzungs-Code ist schon durchgegangen (interner
+    // Reconnect beim Cloud-Upload). Dann hier holen - der Upload braucht die Abos.
+    if (!locked) await loadAll();
+  }
+
+  /// Holt alles, was erst NACH der Autorisierung gebraucht wird: die Werte der
+  /// Oberflaeche und die Live-Abos.
+  ///
+  /// Wird vom Sperr-Bildschirm aufgerufen, sobald der Code angenommen wurde -
+  /// und zwar abgewartet, damit der Hauptbildschirm nicht erst mit Vorgabewerten
+  /// erscheint und dann nachtraeglich umspringt.
+  Future<void> loadAll() async {
+    if (_loaded) return;
+    _loaded = true;
     connectStep = 'Werte lesen...';
     notifyListeners();
     await _readAll();
     connectStep = 'Live-Daten abonnieren...';
     notifyListeners();
     await _subscribeNotifies();
-    connectStep = 'Zugang pruefen...';
-    notifyListeners();
-    await _authenticate();   // Zugangscode (Default 123456) automatisch senden
-
     connectStep = '';
-    connected = true;
     notifyListeners();
   }
 
@@ -509,21 +552,32 @@ class EyeBle extends ChangeNotifier {
   /// CHR_AUTH_STATUS ist READ/NOTIFY — Nachfragen ist also jederzeit erlaubt und
   /// auf jeder Plattform verlässlich. Die Benachrichtigung bleibt zusätzlich
   /// aktiv; kommt sie an, ist man nur schneller fertig.
-  Future<void> _awaitAuthLevelChange(int before, {int tries = 20}) async {
+  /// Gibt true zurueck, wenn der Stand des Auges tatsaechlich gesehen wurde -
+  /// entweder per Benachrichtigung oder per Nachfrage. false heisst: keine
+  /// Antwort. Nur so laesst sich "Code abgelehnt" von "Auge antwortet nicht"
+  /// unterscheiden.
+  Future<bool> _awaitAuthLevelChange(int before, {int tries = 20}) async {
     final cs = _chars[EyeUuids.chrAuthStatus];
+    bool heard = false;
     for (int i = 0; i < tries && authLevel == before; i++) {
       await Future.delayed(const Duration(milliseconds: 50));
-      if (cs == null || authLevel != before) continue;
+      if (authLevel != before) { heard = true; break; }   // Benachrichtigung war da
+      if (cs == null) continue;
       try {
         // Frist pro Versuch: ein haengendes Lesen wuerde sonst die ganze
         // Warteschleife blockieren, und die Code-Eingabe kaeme nie zum Ende.
         final v = await cs.read().timeout(const Duration(seconds: 2));
-        if (v.isNotEmpty) { _parseAuthLevel(v[0]); notifyListeners(); }
+        if (v.isNotEmpty) {
+          heard = true;
+          _parseAuthLevel(v[0]);
+          notifyListeners();
+        }
       } catch (_) {
         // Ein fehlgeschlagener Lesevorgang ist kein Grund abzubrechen - beim
         // naechsten Durchgang kann es klappen.
       }
     }
+    return heard || authLevel != before;
   }
 
   /// Manuelle Code-Eingabe (falls der gespeicherte Code nicht passt, z.B. anderer
@@ -537,15 +591,30 @@ class EyeBle extends ChangeNotifier {
     // ein Wechsel vom Geraete- auf den Admin-Code sofort durch, ohne dass die
     // Antwort der Firmware da ist - isAdmin waere dann noch nicht gesetzt.
     final before = authLevel;
-    await _writeKey(c, key);
-    await _awaitAuthLevelChange(before);
+    authNoAnswer = false;
+    try {
+      await _writeKey(c, key).timeout(const Duration(seconds: 8));
+    } catch (_) {
+      // Der Code ist nie beim Auge angekommen - das ist kein Fehlversuch.
+      authNoAnswer = true;
+      notifyListeners();
+      return false;
+    }
+    final heard = await _awaitAuthLevelChange(before);
     if (authorized) {
       _sessionKey = key;   // korrekter Code -> nur fuer diese Sitzung merken (RAM)
       // isAdmin wurde bereits aus CHR_AUTH_STATUS gesetzt (_parseAuthLevel) -
       // die App muss den Admin-Code dafuer nicht kennen.
+      // Jetzt erst die Werte und Abos holen (siehe loadAll) - abgewartet, damit
+      // der Hauptbildschirm gleich die richtigen Zahlen zeigt.
+      await loadAll();
       return true;
     }
-    authAttempts++;        // falscher Code -> UI-Feedback
+    if (heard) {
+      authAttempts++;      // wirklich abgelehnt -> UI-Feedback
+    } else {
+      authNoAnswer = true;
+    }
     notifyListeners();
     return false;
   }
@@ -603,6 +672,7 @@ class EyeBle extends ChangeNotifier {
     await _subConn?.cancel();
     _chars.clear();
     try { await device?.disconnect(); } catch (_) {}
+    _loaded = false;
     connectStep = '';
     connected = false;
     authorized = false;

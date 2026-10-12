@@ -38,8 +38,14 @@ class _LockGateState extends State<LockGate> {
     setState(() {
       _busy = false;
       if (!ok) {
-        _error = 'Falscher Code. Nach 5 Fehlversuchen 30 s gesperrt.';
-        _ctrl.clear();
+        // Ausgebliebene Antwort NICHT als falschen Code melden: der Code kann
+        // richtig gewesen sein, und ein Fehlversuch wurde dann auch keiner
+        // gezaehlt. Der Hinweis muss sagen, was wirklich zu tun ist.
+        _error = widget.ble.authNoAnswer
+            ? 'Keine Antwort vom Auge. Nochmal senden - im Browser hilft '
+              'notfalls: Seite neu laden und erneut verbinden.'
+            : 'Falscher Code. Nach 5 Fehlversuchen 30 s gesperrt.';
+        if (!widget.ble.authNoAnswer) _ctrl.clear();
       }
     });
     // Bei Erfolg schaltet ble.authorized -> HomeScreen blendet das Gate aus.
