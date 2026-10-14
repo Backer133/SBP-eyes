@@ -87,6 +87,181 @@ class _HomeScreenState extends State<HomeScreen> {
   /// Bild vollstaendig, der Slave aber nicht. Ohne diesen Weg muesste man die 200 KB
   /// noch einmal komplett vom Handy hochladen, nur um eine Uebertragung anzustossen,
   /// die der Master allein erledigen kann.
+  // ===== Vorlagen =====
+
+  /// Sperre gegen Doppeltippen. Ein zweites Antippen waehrend des Ladens wuerde
+  /// mitten in die Werte des ersten hineinschreiben.
+  bool _templateBusy = false;
+
+  String _templateLabel(int slot) {
+    final t = widget.ble.templates[slot];
+    return t.name.isNotEmpty ? '"${t.name}"' : 'Vorlage ${slot + 1}';
+  }
+
+  Future<void> _templateTap(int slot) async {
+    if (_templateBusy) return;
+    final t = widget.ble.templates[slot];
+    if (!t.belegt) {
+      await _templateSave(slot);
+      return;
+    }
+
+    setState(() => _templateBusy = true);
+    try {
+      // Was die Vorlage gespeichert hat - vor dem Laden merken, um danach zu
+      // erkennen, ob das Auge ersetzt werden musste.
+      final gewuenscht = t.eyeId;
+      final ok = await widget.ble.loadTemplate(slot);
+      if (!mounted) return;
+      if (!ok) {
+        _snack(widget.ble.lastError ?? 'Vorlage konnte nicht geladen werden.',
+            fehler: true);
+        return;
+      }
+      // Die Firmware ersetzt eine tote Cloud-Nummer durch A7. Das sagen wir,
+      // statt den Nutzer raetseln zu lassen - die Vorlage hat ja gewirkt.
+      final tatsaechlich = widget.ble.eyeId[EyeBle.kMaster];
+      if (gewuenscht != null && gewuenscht != tatsaechlich) {
+        _snack('Das gespeicherte Auge ist nicht mehr vorhanden - '
+            '${kEyeLabels[0]} wird gezeigt. Alle uebrigen Einstellungen wurden '
+            'uebernommen.');
+      } else {
+        _snack('${_templateLabel(slot)} geladen.');
+      }
+    } finally {
+      if (mounted) setState(() => _templateBusy = false);
+    }
+  }
+
+  Future<void> _templateSave(int slot) async {
+    final ok = await widget.ble.saveTemplate(slot);
+    if (!mounted) return;
+    _snack(ok
+            ? 'Aktuelle Einstellungen in ${_templateLabel(slot)} gesichert.'
+            : (widget.ble.lastError ?? 'Speichern fehlgeschlagen.'),
+        fehler: !ok);
+  }
+
+  Future<void> _templateActions(int slot) async {
+    final action = await showModalBottomSheet<String>(
+      context: context,
+      builder: (ctx) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              dense: true,
+              title: Text(_templateLabel(slot),
+                  style: Theme.of(ctx).textTheme.titleMedium),
+            ),
+            const Divider(height: 1),
+            ListTile(
+              leading: const Icon(Icons.edit_outlined),
+              title: const Text('Umbenennen'),
+              onTap: () => Navigator.pop(ctx, 'rename'),
+            ),
+            ListTile(
+              leading: const Icon(Icons.save_outlined),
+              title: const Text('Mit aktuellen Einstellungen ueberschreiben'),
+              onTap: () => Navigator.pop(ctx, 'save'),
+            ),
+            ListTile(
+              leading: const Icon(Icons.delete_outline),
+              title: const Text('Vorlage loeschen'),
+              onTap: () => Navigator.pop(ctx, 'delete'),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (!mounted || action == null) return;
+    if (action == 'rename') await _templateRename(slot);
+    if (action == 'save')   await _templateOverwrite(slot);
+    if (action == 'delete') await _templateDelete(slot);
+  }
+
+  Future<void> _templateRename(int slot) async {
+    final ctrl = TextEditingController(text: widget.ble.templates[slot].name);
+    final name = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Vorlage umbenennen'),
+        content: TextField(
+          controller: ctrl,
+          autofocus: true,
+          maxLength: kTemplateNameLen,
+          decoration: const InputDecoration(hintText: 'z. B. Abend, Buehne, Ruhig'),
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx), child: const Text('Abbrechen')),
+          FilledButton(
+              onPressed: () => Navigator.pop(ctx, ctrl.text.trim()),
+              child: const Text('Speichern')),
+        ],
+      ),
+    );
+    if (!mounted || name == null) return;
+    final ok = await widget.ble.renameTemplate(slot, name);
+    if (!mounted) return;
+    _snack(ok ? 'Umbenannt.' : (widget.ble.lastError ?? 'Umbenennen fehlgeschlagen.'),
+        fehler: !ok);
+  }
+
+  Future<void> _templateOverwrite(int slot) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text('${_templateLabel(slot)} ueberschreiben?'),
+        content: const Text(
+            'Die gespeicherten Einstellungen werden durch die aktuellen ersetzt. '
+            'Der Name bleibt.'),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('Abbrechen')),
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('Ueberschreiben')),
+        ],
+      ),
+    );
+    if (ok != true || !mounted) return;
+    await _templateSave(slot);
+  }
+
+  Future<void> _templateDelete(int slot) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text('${_templateLabel(slot)} loeschen?'),
+        content: const Text('Der Platz wird frei. Die Augen selbst bleiben, '
+            'wie sie gerade eingestellt sind.'),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('Abbrechen')),
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('Loeschen')),
+        ],
+      ),
+    );
+    if (ok != true || !mounted) return;
+    final weg = await widget.ble.clearTemplate(slot);
+    if (!mounted) return;
+    _snack(weg ? 'Vorlage geloescht.' : (widget.ble.lastError ?? 'Loeschen fehlgeschlagen.'),
+        fehler: !weg);
+  }
+
+  void _snack(String text, {bool fehler = false}) {
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+      backgroundColor: fehler ? kBad : null,
+      duration: Duration(seconds: fehler ? 6 : 3),
+      content: Text(text),
+    ));
+  }
+
   Future<void> _slotActions(int slot) async {
     final name = _slotMeta[slot]?.name;
     final action = await showModalBottomSheet<String>(
@@ -216,6 +391,8 @@ class _HomeScreenState extends State<HomeScreen> {
         onSlotActions: _slotActions,
         target: _eyeTarget,
         onTargetChanged: (t) => setState(() => _eyeTarget = t),
+        onTemplateTap: _templateTap,
+        onTemplateActions: _templateActions,
       ),
       CloudEyesScreen(ble: ble, onSlotMetaChanged: _loadSlotMeta),
       SettingsScreen(ble: ble),
@@ -303,13 +480,24 @@ class _EyeGrid extends StatelessWidget {
   /// Zustand liegt im Eltern-Bildschirm, damit er den Reiterwechsel ueberlebt.
   final int target;
   final void Function(int) onTargetChanged;
+  /// Vorlage antippen: belegt = laden, leer = aktuellen Zustand speichern.
+  final Future<void> Function(int slot) onTemplateTap;
+  /// Langer Druck auf eine belegte Vorlage.
+  final Future<void> Function(int slot) onTemplateActions;
   const _EyeGrid({
     required this.ble,
     required this.slotMeta,
     required this.onSlotActions,
     required this.target,
     required this.onTargetChanged,
+    required this.onTemplateTap,
+    required this.onTemplateActions,
   });
+
+  /// Metadaten eines Cloud-Slots, oder null. Eigene Funktion, weil die
+  /// Vorlagen-Kacheln dasselbe brauchen wie das Raster.
+  SlotMeta? _slotMetaFor(int slot) =>
+      (slot >= 0 && slot < slotMeta.length) ? slotMeta[slot] : null;
 
   int get _target => target;
 
@@ -379,7 +567,106 @@ class _EyeGrid extends StatelessWidget {
             ),
           ),
         Expanded(child: _grid(context)),
+        _templateRow(context),
         _flickerRow(context, idMaster),
+      ],
+    );
+  }
+
+  /// Vier Vorlagen-Plaetze unter dem Raster.
+  ///
+  /// Tippen auf einen belegten Platz holt die Einstellungen zurueck - ein Klick,
+  /// ohne Rueckfrage. Ein leerer Platz speichert den aktuellen Zustand. Alles
+  /// Weitere (umbenennen, ueberschreiben, loeschen) liegt auf dem langen Druck,
+  /// genau wie bei den Cloud-Slots.
+  Widget _templateRow(BuildContext context) {
+    return Material(
+      color: Colors.white.withOpacity(.03),
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(12, 8, 12, 10),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text('Vorlagen',
+                style: TextStyle(
+                    fontSize: 11,
+                    fontWeight: FontWeight.w700,
+                    letterSpacing: .8,
+                    color: Colors.white.withOpacity(.45))),
+            const SizedBox(height: 6),
+            Row(
+              children: [
+                for (int i = 0; i < kTemplateCount; i++) ...[
+                  if (i > 0) const SizedBox(width: 8),
+                  Expanded(child: _templateTile(context, i)),
+                ],
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _templateTile(BuildContext context, int slot) {
+    final t = slot < ble.templates.length
+        ? ble.templates[slot]
+        : const EyeTemplateInfo(null, '');
+    final beschriftung = t.name.isNotEmpty ? t.name : 'Vorlage ${slot + 1}';
+
+    // Vorschaubild des gespeicherten Motivs. Macht die Plaetze unterscheidbar,
+    // auch wenn noch kein Name vergeben wurde.
+    Widget inhalt;
+    if (!t.belegt) {
+      inhalt = Icon(Icons.add, size: 20, color: Colors.white.withOpacity(.35));
+    } else if (t.eyeId! < kHardcodedEyeCount) {
+      inhalt = Image.asset(kEyeAssets[t.eyeId!], fit: BoxFit.cover);
+    } else {
+      final meta = _slotMetaFor(t.eyeId! - kHardcodedEyeCount);
+      inhalt = meta != null
+          ? Image.network(meta.tileUrl, fit: BoxFit.cover, cacheWidth: 120,
+              errorBuilder: (_, __, ___) =>
+                  Icon(Icons.cloud, size: 18, color: Colors.white.withOpacity(.4)))
+          : Icon(Icons.cloud, size: 18, color: Colors.white.withOpacity(.4));
+    }
+
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        AspectRatio(
+          aspectRatio: 1,
+          child: Material(
+            color: kSurface,
+            borderRadius: BorderRadius.circular(12),
+            child: InkWell(
+              borderRadius: BorderRadius.circular(12),
+              onTap: () => onTemplateTap(slot),
+              onLongPress: t.belegt ? () => onTemplateActions(slot) : null,
+              child: Container(
+                decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(
+                      color: t.belegt
+                          ? Colors.white.withOpacity(.10)
+                          : Colors.white.withOpacity(.06)),
+                ),
+                child: ClipRRect(
+                  borderRadius: BorderRadius.circular(11),
+                  child: Center(child: inhalt),
+                ),
+              ),
+            ),
+          ),
+        ),
+        const SizedBox(height: 4),
+        Text(beschriftung,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            textAlign: TextAlign.center,
+            style: TextStyle(
+                fontSize: 10,
+                color: Colors.white.withOpacity(t.belegt ? .75 : .35))),
       ],
     );
   }

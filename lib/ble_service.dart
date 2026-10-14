@@ -164,6 +164,25 @@ const List<String> kEyeLabels = [
   'A7','A10','SBP','Schub rot'
 ];
 
+/// Was die App ueber eine gespeicherte Vorlage weiss.
+///
+/// Mehr braucht sie nicht: die Einstellungen selbst liegen im Auge und werden
+/// dort auch angewandt. Die App zeigt nur an, was auf dem Platz liegt.
+class EyeTemplateInfo {
+  /// Augen-Nummer des gespeicherten Motivs, oder null wenn der Platz leer ist.
+  final int? eyeId;
+  /// Vom Nutzer vergebener Name, leer wenn keiner gesetzt wurde.
+  final String name;
+  const EyeTemplateInfo(this.eyeId, this.name);
+
+  bool get belegt => eyeId != null;
+}
+
+/// Anzahl der Vorlagen-Plaetze. MUSS zu TEMPLATE_COUNT in Pairing.h passen.
+const int kTemplateCount = 4;
+/// Groesste Namenslaenge. MUSS zu TEMPLATE_NAME_LEN in Pairing.h passen.
+const int kTemplateNameLen = 16;
+
 class EyeBle extends ChangeNotifier {
   BluetoothDevice? device;
   final Map<Guid, BluetoothCharacteristic> _chars = {};
@@ -246,6 +265,13 @@ class EyeBle extends ChangeNotifier {
   /// und Kleinschreibung egal) - sie soll niemanden aussperren, der sein Auge
   /// "tot_feuer" nennt.
   static bool flickerNameOk(String name) => name.toLowerCase().contains('tot');
+
+  /// Die vier Vorlagen-Plaetze, so wie das Auge sie meldet.
+  ///
+  /// Liegt im Auge und nicht im Handy: so sieht jedes Geraet dieselben vier,
+  /// auch die Web-App, auch nach einer Neuinstallation.
+  List<EyeTemplateInfo> templates =
+      List<EyeTemplateInfo>.filled(kTemplateCount, const EyeTemplateInfo(null, ''));
 
   /// Grund, warum der letzte Befehl nicht ankam - null, wenn alles lief.
   ///
@@ -1083,8 +1109,92 @@ class EyeBle extends ChangeNotifier {
       // die Bewegungs-Bytes - dann bleibt die Maske bei 0, also "nichts
       // brennt", und das ist auch die richtige Anzeige.
       if (v.length >= AnimCfg.byteLength + 1) flickerMask = v[AnimCfg.byteLength];
+
+      // Dahinter je Vorlage 17 Byte: Augen-Nummer (0xFF = leer) und 16 Byte Name.
+      // Gestaffelt geprueft wie die Maske darueber - eine aeltere Firmware
+      // liefert kuerzer, dann bleiben die Plaetze leer statt zu stoeren.
+      const blockLen = 1 + kTemplateNameLen;
+      final noetig = AnimCfg.byteLength + 1 + kTemplateCount * blockLen;
+      if (v.length >= noetig) {
+        final neu = <EyeTemplateInfo>[];
+        for (int i = 0; i < kTemplateCount; i++) {
+          final p = AnimCfg.byteLength + 1 + i * blockLen;
+          final id = v[p];
+          final roh = v.sublist(p + 1, p + 1 + kTemplateNameLen);
+          // Der Name ist mit Nullen aufgefuellt - abschneiden, nicht mitnehmen.
+          final ende = roh.indexOf(0);
+          final name = String.fromCharCodes(ende < 0 ? roh : roh.sublist(0, ende));
+          neu.add(EyeTemplateInfo(id == 0xFF ? null : id, name));
+        }
+        templates = neu;
+      }
       notifyListeners();
     }
+  }
+
+  // ===== Vorlagen =====
+  //
+  // Das Zurueckholen passiert in der FIRMWARE, nicht hier. Die App koennte die
+  // acht Einzelwerte nacheinander schreiben - alle Setter gibt es -, aber im
+  // Browser laeuft jeder Schreibvorgang einzeln durch denselben Kanal, und jeder
+  // einzelne kann scheitern und einen halb hergestellten Zustand hinterlassen.
+  // Ein Kommando ist EIN Schreibvorgang; der Master verteilt danach selbst.
+
+  /// Sichert den aktuellen Zustand auf Platz [slot].
+  Future<bool> saveTemplate(int slot) async {
+    if (slot < 0 || slot >= kTemplateCount) return false;
+    if (!await _animCmd(6, slot)) return false;
+    await _readAnimCfg();
+    return true;
+  }
+
+  /// Leert Platz [slot]. Bit 7 im Argument statt eines eigenen Kommandos.
+  Future<bool> clearTemplate(int slot) async {
+    if (slot < 0 || slot >= kTemplateCount) return false;
+    if (!await _animCmd(6, slot | 0x80)) return false;
+    await _readAnimCfg();
+    return true;
+  }
+
+  /// Benennt Platz [slot] um. Ruehrt die gespeicherten Einstellungen nicht an.
+  Future<bool> renameTemplate(int slot, String name) async {
+    if (slot < 0 || slot >= kTemplateCount) return false;
+    final roh = name.trim().codeUnits;
+    final kurz = roh.length > kTemplateNameLen
+        ? roh.sublist(0, kTemplateNameLen)
+        : roh;
+    if (!await _animCmd(8, slot, Uint8List.fromList(kurz))) return false;
+    await _readAnimCfg();
+    return true;
+  }
+
+  /// Holt Platz [slot] zurueck.
+  ///
+  /// Danach werden die betroffenen Werte aktiv nachgelesen: im Browser gibt es
+  /// keine Benachrichtigungen, die Oberflaeche erfuehre sonst nichts von der
+  /// Aenderung.
+  Future<bool> loadTemplate(int slot) async {
+    if (slot < 0 || slot >= kTemplateCount) return false;
+    if (!await _animCmd(7, slot)) return false;
+
+    final eid  = await _readPair(EyeUuids.chrEyeId);
+    final br   = await _readPair(EyeUuids.chrBrightness);
+    final an   = await _readPair(EyeUuids.chrAnimEn);
+    if (eid != null) eyeId = eid;
+    if (br  != null) brightness = br;
+    if (an  != null) animEnabled = an;
+    final g = await _readBytes(EyeUuids.chrEyeGeom);
+    if (g != null && g.length >= 4) {
+      eyeYOff = [_s8(g[0]), _s8(g[2])];
+      eyeVisH = [g[1], g[3]];
+      if (g.length >= 8) {
+        eyeXOff = [_s8(g[4]), _s8(g[6])];
+        eyeZoom = [g[5], g[7]];
+      }
+    }
+    await _readAnimCfg();
+    notifyListeners();
+    return true;
   }
 
   /// Schaltet das Flackern fuer EIN Auge ein oder aus.

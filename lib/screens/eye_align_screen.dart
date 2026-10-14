@@ -26,7 +26,9 @@ class EyeAlignScreen extends StatefulWidget {
 
 class _EyeAlignScreenState extends State<EyeAlignScreen> {
   int _target = 0;               // 0 = Master, 1 = Slave
-  bool _guides = true;           // beim Öffnen an: man will die Kante sehen
+  // Beim Oeffnen AUS. Die Linien sind eine Hilfe beim Einrichten, kein
+  // Dauerzustand - und wer nur den Zoom nachstellt, will sie nicht sehen.
+  bool _guides = false;
   int? _previewYOff;
   int? _previewVisH;
   int? _previewXOff;
@@ -55,7 +57,10 @@ class _EyeAlignScreenState extends State<EyeAlignScreen> {
       await widget.ble.ensureGeom();
       if (!mounted) return;
       setState(() {});
-      widget.ble.setEyeGuides(true);
+      // BEWUSST senden und nicht einfach weglassen: so stimmen Schalter und
+      // Geraet auch dann ueberein, wenn die Linien aus einer frueheren Sitzung
+      // noch an sind - eye_guides lebt in der Firmware nur im Arbeitsspeicher.
+      widget.ble.setEyeGuides(false);
     });
   }
 
