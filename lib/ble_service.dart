@@ -40,7 +40,7 @@ class EyeUuids {
   static final Guid chrLinkDiag  = Guid("6E400017-B5A3-F393-E0A9-E50E24DCCA9E");
 }
 
-const int kHardcodedEyeCount = 4;   // A7, A10, A12, A13 (in dieser Reihenfolge!)
+const int kHardcodedEyeCount = 4;   // A7, A10, SBP, Schub_red (in dieser Reihenfolge!)
 // Vier Slots. Als Cloud-Augen noch Rohdaten waren (204800 Byte je Slot), war das
 // die Obergrenze: vier belegten 819200 der 917504 Byte des LittleFS. Als JPEG sind
 // es nur noch rund 45 KB je Slot, es waeren also deutlich mehr moeglich - acht
@@ -157,11 +157,11 @@ class FoundSlave {
 const List<String> kEyeAssets = [
   'assets/eyes/A7.png',
   'assets/eyes/A10.png',
-  'assets/eyes/A12.png',
-  'assets/eyes/A13.png',
+  'assets/eyes/SBP.png',
+  'assets/eyes/Schub_red.png',
 ];
 const List<String> kEyeLabels = [
-  'A7','A10','A12','A13'
+  'A7','A10','SBP','Schub rot'
 ];
 
 class EyeBle extends ChangeNotifier {
