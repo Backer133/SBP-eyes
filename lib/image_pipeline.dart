@@ -17,6 +17,7 @@
 // Die Wandlung nach RGB565 (big-endian, LV_COLOR_16_SWAP=1) macht jetzt der Decoder
 // auf dem Geraet.
 
+import 'dart:math' as math;
 import 'dart:typed_data';
 import 'package:image/image.dart' as img;
 
@@ -35,9 +36,10 @@ const int kEyeContent = 280;
 /// Groesse der Fehlend-Bitmaske in der Empfangsquittung.
 const int kEyeJpegMax = 80000;
 
-/// Wie stark der Rand entlang der Kante verwischt wird, je Schritt nach aussen.
-/// MUSS zu BORDER_BLUR in tools/eye_assets.py passen.
-const double kBorderBlur = 1.6;
+/// Unterhalb dieser Streuung entlang der Kante gilt sie als gleichfoermig und
+/// der Rand wird geklemmt statt gespiegelt.
+/// MUSS zu BORDER_UNIFORM in tools/eye_assets.py passen.
+const double kEdgeUniform = 3.0;
 
 /// JPEG-Qualitaet. 92 mit 4:4:4-Chroma. Gemessen gegen das Rohbild lag die
 /// groesste Abweichung damit bei 2-3 von 31 Helligkeitsstufen, also auf dem
@@ -68,97 +70,70 @@ Uint8List pngToEyeJpeg(Uint8List pngBytes) {
                        interpolation: img.Interpolation.linear)
       : src;
 
-  // Leinwand mit VERWISCHTEM Rand.
+  // Leinwand mit fortgesetztem Rand - das Verfahren richtet sich nach dem MOTIV.
   //
-  // Zwei verworfene Wege stecken hier drin, beide am Geraet gesehen:
+  // KLEMMEN (Randpixel wiederholen) ist exakt, solange die Kante gleichfoermig
+  // ist. Kreuzt dagegen eine Ader die Kante, wird sie ueber die ganze
+  // Randbreite zu einem waagrechten Strich gezogen - die "verschmierten roten
+  // Streifen".
   //
-  //   1. KLEMMEN - jedes Randpixel aus dem naechstgelegenen Inhaltspixel. Wo
-  //      eine Ader die Inhaltskante kreuzt, wird sie ueber die ganze Randbreite
-  //      zu einem waagrechten Strich gezogen: sichtbare rote Streifen, sobald
-  //      das Auge seitlich am Anschlag steht.
-  //   2. SPIEGELN - loeste die Streifen, holt aber den Bildinhalt zurueck ins
-  //      Bild. Bei Motiven auf schwarzem Grund, deren Iris bis an die
-  //      Inhaltskante reicht, erscheint am Anschlag eine zweite, gespiegelte
-  //      Iris.
+  // SPIEGELN setzt Adern plausibel fort, holt aber den Bildinhalt zurueck ins
+  // Bild: es wiederholt nicht den Randpixel, sondern klappt die ersten 40 px
+  // des INHALTS nach aussen. Bei einem Motiv auf schwarzem Grund ist die Kante
+  // zwar schwarz, 40 px weiter innen beginnt aber schon die Iris - und damit
+  // erscheint am Anschlag eine zweite, gespiegelte Iris. Am Geraet gesehen.
   //
-  // Jetzt wird die Kante nach aussen fortgesetzt und dabei ENTLANG der Kante
-  // gemittelt, mit wachsendem Fenster: am Inhaltsrand fast der Kantenpixel
-  // (nahtlos), ganz aussen ein breiter Mittelwert. Eine Ader wird so zu einem
-  // weichen Schleier statt zu einem Strich, eine schwarze Flaeche bleibt
-  // schwarz - und gespiegelt wird gar nichts mehr.
+  // Keines von beiden taugt fuer alle Motive, aber die Entscheidung laesst sich
+  // messen: die Streuung der Helligkeit ENTLANG der Kante. Gemessen an den
+  // Vorlagen: schwarzer Grund 0,0 bis 0,1 - Motive mit Adern 12,2. Unter
+  // kEdgeUniform wird geklemmt, darueber gespiegelt. Jedes Motiv bekommt so das
+  // Verfahren, bei dem es nichts verliert, und weichgezeichnet wird nirgends.
   //
-  // Dasselbe Verfahren benutzt tools/eye_assets.py fuer die eingebauten Augen -
-  // beide muessen gleich aussehen, sonst faellt der Wechsel zwischen einem
-  // Cloud-Auge und einem eingebauten auf. kBorderBlur muss dort ebenfalls
-  // uebereinstimmen.
+  // Dasselbe macht tools/eye_assets.py fuer die eingebauten Augen - beide
+  // muessen gleich aussehen, sonst faellt der Wechsel zwischen einem Cloud-Auge
+  // und einem eingebauten auf. kEdgeUniform muss dort ebenfalls uebereinstimmen.
   final pad = (kEyeWidth - kEyeContent) ~/ 2;
-  final canvas = img.Image(width: kEyeWidth, height: kEyeHeight);
 
-  for (int y = 0; y < kEyeContent; y++) {
-    for (int x = 0; x < kEyeContent; x++) {
-      canvas.setPixel(x + pad, y + pad, content.getPixel(x, y));
-    }
-  }
-
-  // Praefixsummen je Farbkanal - damit kostet ein Fenstermittel O(1) statt
-  // einer Schleife je Pixel. Bei bis zu 129 Werten im Fenster ist das der
-  // Unterschied zwischen Millisekunden und spuerbarem Warten auf dem Handy.
-  List<List<int>> prefix(List<List<int>> werte) {
-    final p = <List<int>>[[0, 0, 0]];
+  double streuung(List<int> werte) {
+    final m = werte.reduce((a, b) => a + b) / werte.length;
+    var s = 0.0;
     for (final w in werte) {
-      final l = p.last;
-      p.add([l[0] + w[0], l[1] + w[1], l[2] + w[2]]);
+      s += (w - m) * (w - m);
     }
-    return p;
+    return math.sqrt(s / werte.length);
   }
 
-  List<int> fenster(List<List<int>> p, int i, int k, int n) {
-    final a = (i - k) < 0 ? 0 : (i - k);
-    final b = (i + k) > (n - 1) ? (n - 1) : (i + k);
-    final anz = b - a + 1;
-    return [
-      (p[b + 1][0] - p[a][0]) ~/ anz,
-      (p[b + 1][1] - p[a][1]) ~/ anz,
-      (p[b + 1][2] - p[a][2]) ~/ anz,
-    ];
+  int hell(int x, int y) {
+    final p = content.getPixel(x, y);
+    final r = p.r.toInt(), g = p.g.toInt(), b = p.b.toInt();
+    return r > g ? (r > b ? r : b) : (g > b ? g : b);
   }
 
-  List<int> rgbVon(img.Pixel px) =>
-      [px.r.toInt(), px.g.toInt(), px.b.toInt()];
+  final kanten = <List<int>>[
+    [for (int y = 0; y < kEyeContent; y++) hell(0, y)],
+    [for (int y = 0; y < kEyeContent; y++) hell(kEyeContent - 1, y)],
+    [for (int x = 0; x < kEyeContent; x++) hell(x, 0)],
+    [for (int x = 0; x < kEyeContent; x++) hell(x, kEyeContent - 1)],
+  ];
+  final schlimmste =
+      kanten.map(streuung).reduce((a, b) => a > b ? a : b);
+  final spiegeln = schlimmste >= kEdgeUniform;
 
-  // Links und rechts: die beiden Randspalten nach aussen verwischen.
-  final pl = prefix([
-    for (int y = 0; y < kEyeContent; y++) rgbVon(content.getPixel(0, y))
-  ]);
-  final pr = prefix([
-    for (int y = 0; y < kEyeContent; y++)
-      rgbVon(content.getPixel(kEyeContent - 1, y))
-  ]);
-  for (int y = 0; y < kEyeContent; y++) {
-    for (int d = 1; d <= pad; d++) {
-      final k = (d * kBorderBlur).toInt();
-      final l = fenster(pl, y, k, kEyeContent);
-      final r = fenster(pr, y, k, kEyeContent);
-      canvas.setPixelRgb(pad - d, y + pad, l[0], l[1], l[2]);
-      canvas.setPixelRgb(pad + kEyeContent - 1 + d, y + pad, r[0], r[1], r[2]);
+  int abb(int v) {
+    if (spiegeln) {
+      if (v < 0) return -v - 1;
+      if (v >= kEyeContent) return 2 * kEyeContent - v - 1;
+      return v;
     }
+    return v.clamp(0, kEyeContent - 1);
   }
 
-  // Oben und unten ueber die GANZE Breite - damit sind auch die Ecken erledigt.
-  final pt = prefix([
-    for (int x = 0; x < kEyeWidth; x++) rgbVon(canvas.getPixel(x, pad))
-  ]);
-  final pb = prefix([
-    for (int x = 0; x < kEyeWidth; x++)
-      rgbVon(canvas.getPixel(x, pad + kEyeContent - 1))
-  ]);
-  for (int x = 0; x < kEyeWidth; x++) {
-    for (int d = 1; d <= pad; d++) {
-      final k = (d * kBorderBlur).toInt();
-      final o = fenster(pt, x, k, kEyeWidth);
-      final u = fenster(pb, x, k, kEyeWidth);
-      canvas.setPixelRgb(x, pad - d, o[0], o[1], o[2]);
-      canvas.setPixelRgb(x, pad + kEyeContent - 1 + d, u[0], u[1], u[2]);
+  final canvas = img.Image(width: kEyeWidth, height: kEyeHeight);
+  for (int y = 0; y < kEyeHeight; y++) {
+    final sy = abb(y - pad).clamp(0, kEyeContent - 1);
+    for (int x = 0; x < kEyeWidth; x++) {
+      final sx = abb(x - pad).clamp(0, kEyeContent - 1);
+      canvas.setPixel(x, y, content.getPixel(sx, sy));
     }
   }
 
