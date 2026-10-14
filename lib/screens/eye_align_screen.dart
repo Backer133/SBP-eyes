@@ -148,7 +148,11 @@ class _EyeAlignScreenState extends State<EyeAlignScreen> {
         return Scaffold(
           appBar: AppBar(title: const Text('Augen ausrichten')),
           body: ListView(
-            padding: const EdgeInsets.fromLTRB(16, 12, 16, 32),
+            // Die Navigationsleiste des Handys liegt ueber dem Inhalt. Ohne
+            // ihre Hoehe hier war die letzte Zeile des letzten Eintrags
+            // abgeschnitten - sichtbar beim Punkt "Auf Mitte zuruecksetzen".
+            padding: EdgeInsets.fromLTRB(
+                16, 12, 16, 32 + MediaQuery.of(context).padding.bottom),
             children: [
               // --- Auswahl + Blinken in einer Zeile: "welches Auge stelle ich ein" ---
               Row(
