@@ -4,12 +4,14 @@ WICHTIG: Nach jedem neu hinzugefuegten Auge einmal ausfuehren und das Ergebnis
 mit committen.
 
 Warum es das gibt: Die App zeigt in der Cloud-Liste 56x56 grosse Vorschauen. Ohne
-diese Dateien laedt sie dafuer die vollen Augen herunter - elf Stueck mal rund
-1,5 MB sind 16,3 MB bei JEDEM Oeffnen des Bildschirms. GitHub hat den Zugriff auf
-raw.githubusercontent.com daraufhin gedrosselt (HTTP 429 bzw. 503), womit nicht nur
-die Vorschau ausfiel, sondern auch der Download - beide nutzen dieselbe URL.
+diese Dateien laedt sie dafuer die vollen Augen herunter - damals elf Stueck mal
+rund 1,5 MB, also 16,3 MB bei JEDEM Oeffnen des Bildschirms. GitHub hat den Zugriff
+auf raw.githubusercontent.com daraufhin gedrosselt (HTTP 429 bzw. 503), womit nicht
+nur die Vorschau ausfiel, sondern auch der Download - beide nutzen dieselbe URL.
 
-Mit den Vorschaubildern sind es rund 5 KB je Auge, also 56 KB statt 16,3 MB.
+Mit den Vorschaubildern sind es rund 6 KB je Auge. Inzwischen stehen 33 Augen mit
+47,7 MB nur 205 KB Vorschaubildern gegenueber; der Ordner waechst weiter, der
+Abstand also auch.
 
 WebP, weil es Transparenz kann (zwei der Augen haben transparente Bereiche, als JPEG
 wuerden die schwarz) und trotzdem etwa zwoelfmal kleiner ist als PNG. Flutter
