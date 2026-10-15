@@ -681,8 +681,18 @@ class _EyeGrid extends StatelessWidget {
     // Nur fuer Cloud-Augen, und dort nur fuer die Feuer-Motive: der Schalter
     // erscheint, wenn "Tot" im Namen steht. Siehe EyeBle.flickerNameOk.
     if (!EyeBle.flickerAllowed(id)) return const SizedBox.shrink();
-    if (!EyeBle.flickerNameOk(_eyeName(id))) return const SizedBox.shrink();
     final an = ble.flickerBurns(id);
+    // ... mit einer Ausnahme: STEHT das Flackern an, wird der Schalter immer
+    // gezeigt, auch wenn der Name nicht passt. Eine eingeschaltete Einstellung
+    // darf nie unerreichbar sein.
+    //
+    // Genau das war passiert: die Maske im Auge zeigt auf PLAETZE, nicht auf
+    // Bilder. Wurde ein Cloud-Platz mit brennendem "Tot"-Auge geleert und mit
+    // einem anders benannten Bild neu bespielt, flackerte das neue Motiv - und
+    // der Schalter zum Ausschalten war weg. Die Firmware nimmt das Bit jetzt
+    // selbst zurueck (flicker_forget_slot); diese Zeile ist der zweite Riegel,
+    // der auch bei einem Auge auf aelterem Stand noch greift.
+    if (!an && !EyeBle.flickerNameOk(_eyeName(id))) return const SizedBox.shrink();
     return Material(
       color: Colors.white.withOpacity(.03),
       child: SwitchListTile(
